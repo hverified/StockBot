@@ -1,0 +1,8 @@
+fastapi==0.136.0
+kiteconnect==5.0.1
+pandas==2.2.3
+pymongo==4.13.2
+python-dotenv==1.1.1
+requests==2.32.5
+uvicorn==0.44.0
+yfinance==0.2.65

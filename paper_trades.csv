@@ -1,0 +1,72 @@
+event_type,timestamp,trade_date,signal,status,skip_reason,trade_id,option_symbol,strike,option_type,entry_price,exit_price,quantity,capital_used,stop_loss_price,target_price,gross_pnl,charges,net_pnl,slippage_pct,message
+signal,2026-04-23T09:20:10.003971+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:25:10.006114+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:30:10.011156+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:35:10.010227+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:40:10.011106+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:45:10.005541+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:50:10.005706+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T09:55:10.005453+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:00:10.006070+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+entry,2026-04-23T10:05:12.143534+05:30,2026-04-23,BUY,OPEN,,2026-04-23T04:30:00+00:00::BUY::2026-04-23T10:05:12.143534+05:30,NIFTY26APR24300CE,24300,CE,199.89,,450,89950.5,199.69,215.88,,,,0.75,Paper trade entry created.
+exit,2026-04-23T10:05:14.103958+05:30,2026-04-23,BUY,LOSS,,2026-04-23T04:30:00+00:00::BUY::2026-04-23T10:05:12.143534+05:30,NIFTY26APR24300CE,24300,CE,199.89,197.46,450,89950.5,199.69,215.88,-1093.5,161.94,-1255.44,0.75,Paper trade closed by STOP_LOSS.
+signal,2026-04-23T10:10:10.002756+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:15:10.005999+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:20:10.005874+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:25:10.001332+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:30:10.003696+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:35:10.005950+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:40:10.001323+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:45:10.005597+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:50:10.005895+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T10:55:10.006124+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh BUY/SELL signal on the latest closed candle.
+signal,2026-04-23T11:00:10.005989+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:05:10.005895+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:10:10.006333+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:15:10.006385+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:20:10.005976+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+entry,2026-04-23T11:25:56.764146+05:30,2026-04-23,SELL,OPEN,,2026-04-23T05:50:00+00:00::SELL::2026-04-23T11:25:56.764146+05:30,NIFTY26APR24200PE,24200,PE,212.38,,450,95571.0,212.29,229.37,,,,0.75,Paper trade entry created.
+exit,2026-04-23T11:26:18.235021+05:30,2026-04-23,SELL,LOSS,,2026-04-23T05:50:00+00:00::SELL::2026-04-23T11:25:56.764146+05:30,NIFTY26APR24200PE,24200,PE,212.38,208.92,450,95571.0,212.29,229.37,-1557.0,168.86,-1725.86,0.75,Paper trade closed by STOP_LOSS.
+signal,2026-04-23T11:30:10.006406+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:35:10.001640+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:40:10.001055+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:45:10.005926+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:50:10.005414+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T11:55:10.002077+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:00:10.005970+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:05:10.006297+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:10:10.006191+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:15:09.994771+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:20:10.010068+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:25:10.010325+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+skipped,2026-04-23T12:30:10.012037+05:30,2026-04-23,SELL,SKIPPED,stop_loss_above_limit,,,24200,PE,213.54,,,,188.85,,,,,0.75,Signal skipped because stop-loss percentage 11.56% from option_signal_candle_low is invalid or above 8.00%.
+signal,2026-04-23T12:35:10.004200+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:40:10.010514+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:45:10.010523+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:50:10.016014+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T12:55:10.010852+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:00:10.010814+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:05:10.016198+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:10:10.011055+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:15:10.011119+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+skipped,2026-04-23T13:20:10.011389+05:30,2026-04-23,BUY,SKIPPED,stop_loss_above_limit,,,24200,CE,212.99,,,,180.5,,,,,0.75,Signal skipped because stop-loss percentage 15.25% from option_signal_candle_low is invalid or above 8.00%.
+signal,2026-04-23T13:25:10.007430+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:30:10.011030+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:35:10.013761+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:40:10.011469+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:45:10.006250+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:50:10.002283+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T13:55:10.007459+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+entry,2026-04-23T14:00:56.944844+05:30,2026-04-23,BUY,OPEN,,2026-04-23T08:25:00+00:00::BUY::2026-04-23T14:00:56.944844+05:30,NIFTY26APR24200CE,24200,CE,199.64,,455,90836.2,194.85,211.62,,,,0.75,Paper trade entry created.
+exit,2026-04-23T14:02:04.194435+05:30,2026-04-23,BUY,LOSS,,2026-04-23T08:25:00+00:00::BUY::2026-04-23T14:00:56.944844+05:30,NIFTY26APR24200CE,24200,CE,199.64,191.55,455,90836.2,194.85,211.62,-3680.95,161.45,-3842.4,0.75,Paper trade closed by STOP_LOSS.
+signal,2026-04-23T14:05:10.005997+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T14:10:10.007586+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T14:15:10.005871+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
+entry,2026-04-23T14:20:57.425815+05:30,2026-04-23,SELL,OPEN,,2026-04-23T08:45:00+00:00::SELL::2026-04-23T14:20:57.425815+05:30,NIFTY26APR24200PE,24200,PE,188.66,,,455,85840.3,177.3,199.98,,,,0.3,Paper trade entry created.
+exit,2026-04-23T14:33:23.941419+05:30,2026-04-23,SELL,WIN,,2026-04-23T08:45:00+00:00::SELL::2026-04-23T14:20:57.425815+05:30,NIFTY26APR24200PE,24200,PE,188.66,,200.4,455,85840.3,177.3,199.98,5341.7,160.69,5181.01,0.3,Paper trade closed by TARGET.
+signal,2026-04-23T14:35:10.010893+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T14:40:10.011450+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T14:45:10.011329+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T14:50:10.011355+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T14:55:10.011031+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
+signal,2026-04-23T15:00:10.006486+05:30,2026-04-23,,NO_SIGNAL,,,,,,,,,,,,,,,,,No fresh signal
