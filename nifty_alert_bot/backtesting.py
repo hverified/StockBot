@@ -270,6 +270,12 @@ def run_option_contract_backtest(settings, request: OptionContractBacktestReques
     price_provider = OptionPriceProvider(settings)
 
     try:
+        option_exchange = str(request.exchange or settings.zerodha_option_exchange).strip().upper()
+        if option_exchange == "BFO":
+            option_underlying = get_instrument_spec("SENSEX").zerodha_underlying
+        else:
+            option_underlying = get_instrument_spec("NIFTY").zerodha_underlying
+
         signal_interval = str(request.interval or "1m").lower()
         signal_interval_minutes = interval_to_minutes(signal_interval)
         signal_kite_interval = kite_interval(signal_interval)
@@ -287,15 +293,19 @@ def run_option_contract_backtest(settings, request: OptionContractBacktestReques
         signal_events: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         for contract_order, contract_input in enumerate(contract_inputs):
-            contract = price_provider.find_contract_by_symbol(contract_input, request.exchange)
+            contract = price_provider.find_contract_by_symbol(contract_input, option_exchange)
             if contract is None:
                 contract = price_provider.resolve_contract_input(
                     contract_input,
                     from_dt,
-                    request.exchange,
+                    option_exchange,
+                    option_underlying,
                 )
             if contract is None:
-                raise ValueError(f"Option contract not found: {contract_input}. Check symbol and exchange.")
+                raise ValueError(
+                    f"Option contract not found: {contract_input}. "
+                    f"Check exchange {option_exchange}, underlying {option_underlying}, symbol, and token validity."
+                )
 
             option_candles = _option_candles_to_frame(
                 price_provider.historical_option_candles(
@@ -614,6 +624,8 @@ def run_option_contract_backtest(settings, request: OptionContractBacktestReques
                 "symbol": " / ".join(context["contract"].tradingsymbol for context in contract_contexts),
                 "instrument": "OPTION",
                 "instrumentLabel": " / ".join(context["contract"].tradingsymbol for context in contract_contexts),
+                "underlying": option_underlying,
+                "exchange": option_exchange,
                 "contracts": [context["contract"].tradingsymbol for context in contract_contexts],
                 "contractStats": contract_stats,
                 "lotSize": request.lot_size,

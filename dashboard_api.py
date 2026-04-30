@@ -99,6 +99,7 @@ class BacktestApiRequest(BaseModel):
 
 class BacktestExportRequest(BaseModel):
     result: dict[str, Any]
+    reportType: str = "trades"
 
 
 class OptionContractBacktestApiRequest(BaseModel):
@@ -320,6 +321,58 @@ def _write_backtest_csv(result: dict[str, Any], timezone) -> Path:
                     "executionSource": trade.get("executionSource"),
                 }
             )
+
+    return path
+
+
+def _write_option_backtest_report_csv(result: dict[str, Any], timezone) -> Path:
+    trades = result.get("trades") or []
+    if not isinstance(trades, list):
+        trades = []
+
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    request = result.get("request") if isinstance(result.get("request"), dict) else {}
+    generated_at = datetime.now(timezone)
+    export_dir = Path("exports/backtests")
+    export_dir.mkdir(parents=True, exist_ok=True)
+    symbol = str(data.get("symbol") or "OPTION").replace(" ", "_").replace("/", "-")
+    path = export_dir / f"{generated_at.strftime('%Y%m%d_%H%M%S')}_{symbol}_option_report.csv"
+
+    option_rows = {
+        "CE": {"trades": 0, "pnl": 0.0},
+        "PE": {"trades": 0, "pnl": 0.0},
+    }
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        option_type = str(trade.get("optionType") or "").upper()
+        if option_type not in option_rows:
+            continue
+        option_rows[option_type]["trades"] += 1
+        option_rows[option_type]["pnl"] += float(trade.get("netPnl") or 0.0)
+
+    row = {
+        "exportedAt": generated_at.isoformat(),
+        "startDate": request.get("start_date"),
+        "endDate": request.get("end_date"),
+        "contracts": " / ".join(data.get("contracts") or []),
+        "exchange": request.get("exchange"),
+        "interval": data.get("signalInterval") or data.get("interval"),
+        "signalMode": data.get("signalMode"),
+        "entrySignal": request.get("entry_signal"),
+        "totalTrades": summary.get("tradeCount"),
+        "totalPnl": summary.get("netPnl"),
+        "ceTrades": option_rows["CE"]["trades"],
+        "peTrades": option_rows["PE"]["trades"],
+        "cePnl": round(option_rows["CE"]["pnl"], 2),
+        "pePnl": round(option_rows["PE"]["pnl"], 2),
+    }
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer.writeheader()
+        writer.writerow(row)
 
     return path
 
@@ -1366,10 +1419,15 @@ def run_option_contract_backtest_api(payload: OptionContractBacktestApiRequest) 
 @app.post("/api/backtest/export")
 def export_backtest_api(payload: BacktestExportRequest) -> dict[str, Any]:
     settings = get_settings()
-    path = _write_backtest_csv(payload.result, settings.timezone)
+    if payload.reportType == "option_summary":
+        path = _write_option_backtest_report_csv(payload.result, settings.timezone)
+        rows = 1
+    else:
+        path = _write_backtest_csv(payload.result, settings.timezone)
+        rows = len(payload.result.get("trades") or [])
     return {
         "status": "ok",
         "message": f"Backtest CSV saved to {path}.",
         "path": str(path),
-        "rows": len(payload.result.get("trades") or []),
+        "rows": rows,
     }

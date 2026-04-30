@@ -309,12 +309,22 @@ class OptionPriceProvider:
                 )
             return []
 
-    def resolve_contract(self, strike: int, option_type: str, as_of: datetime) -> OptionContract | None:
+    def resolve_contract(
+        self,
+        strike: int,
+        option_type: str,
+        as_of: datetime,
+        exchange: str | None = None,
+        underlying: str | None = None,
+    ) -> OptionContract | None:
         if not self.zerodha_available:
             return None
 
+        target_exchange = exchange or self.settings.zerodha_option_exchange
+        target_underlying = (underlying or self.settings.zerodha_underlying).upper()
+
         try:
-            rows = self._load_option_instruments()
+            rows = self._load_option_instruments(exchange=target_exchange)
         except Exception as exc:
             if _is_token_error(exc):
                 logger.info("Zerodha option instruments unavailable: invalid or expired access token. Falling back to synthetic pricing.")
@@ -326,7 +336,7 @@ class OptionPriceProvider:
         matches: list[dict[str, Any]] = []
 
         for item in rows:
-            if str(item.get("name", "")).upper() != self.settings.zerodha_underlying.upper():
+            if str(item.get("name", "")).upper() != target_underlying:
                 continue
             if str(item.get("instrument_type", "")).upper() != option_type.upper():
                 continue
@@ -342,7 +352,7 @@ class OptionPriceProvider:
         if not matches:
             logger.warning(
                 "No Zerodha option instrument found for %s %s %s. Using synthetic fallback.",
-                self.settings.zerodha_underlying,
+                target_underlying,
                 strike,
                 option_type,
             )
@@ -351,7 +361,7 @@ class OptionPriceProvider:
         chosen = min(matches, key=lambda item: (_parse_expiry(item.get("expiry")) or today, item.get("tradingsymbol", "")))
         expiry_value = _parse_expiry(chosen.get("expiry"))
         return OptionContract(
-            exchange=str(chosen.get("exchange") or self.settings.zerodha_option_exchange),
+            exchange=str(chosen.get("exchange") or target_exchange),
             tradingsymbol=str(chosen["tradingsymbol"]),
             instrument_token=int(chosen["instrument_token"]),
             strike=int(strike),
@@ -398,6 +408,7 @@ class OptionPriceProvider:
         contract_input: str,
         as_of: datetime,
         exchange: str | None = None,
+        underlying: str | None = None,
     ) -> OptionContract | None:
         normalized = str(contract_input or "").strip().upper().replace(" ", "")
         if not normalized:
@@ -407,7 +418,13 @@ class OptionPriceProvider:
         if compact_match:
             strike = int(compact_match.group(1))
             option_type = compact_match.group(2)
-            return self.resolve_contract(strike, option_type, as_of)
+            return self.resolve_contract(
+                strike,
+                option_type,
+                as_of,
+                exchange=exchange,
+                underlying=underlying,
+            )
 
         return self.find_contract_by_symbol(normalized, exchange)
 

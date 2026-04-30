@@ -1322,6 +1322,12 @@ export function App() {
     setOptionBacktestForm((current) => ({
       ...current,
       [field]: value,
+      ...(field === "exchange" && value === "BFO"
+        ? { lotSize: current.lotSize === "75" ? "20" : current.lotSize }
+        : {}),
+      ...(field === "exchange" && value === "NFO"
+        ? { lotSize: current.lotSize === "20" ? "75" : current.lotSize }
+        : {}),
     }));
   }
 
@@ -1550,6 +1556,45 @@ export function App() {
         exportError instanceof Error
           ? exportError.message
           : "Unable to export backtest CSV.",
+      );
+    } finally {
+      setBacktestExportLoading(false);
+    }
+  }
+
+  async function exportOptionBacktestReportCsv() {
+    if (!optionBacktestResult) {
+      setError("Run an option backtest before saving the report CSV.");
+      return;
+    }
+
+    setBacktestExportLoading(true);
+    setActionMessage("");
+    setError("");
+
+    try {
+      const response = await fetch(apiUrl("/api/backtest/export"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          result: optionBacktestResult,
+          reportType: "option_summary",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Option report CSV export failed with ${response.status}`);
+      }
+
+      const payload = await response.json();
+      setActionMessage(payload.message ?? "Option report CSV saved.");
+    } catch (exportError) {
+      setError(
+        exportError instanceof Error
+          ? exportError.message
+          : "Unable to export option report CSV.",
       );
     } finally {
       setBacktestExportLoading(false);
@@ -4636,6 +4681,25 @@ export function App() {
 
           {optionBacktestResult ? (
             <>
+              <section className="panel pnl-report-panel">
+                <div className="panel-header">
+                  <div>
+                    <p className="panel-title">Option Backtest Report</p>
+                    <p className="panel-subtitle">
+                      Save date, contracts, CE/PE trades, and CE/PE PnL as a local CSV.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="action-button"
+                    onClick={exportOptionBacktestReportCsv}
+                    disabled={backtestExportLoading}
+                  >
+                    {backtestExportLoading ? "Saving CSV..." : "Save Report CSV"}
+                  </button>
+                </div>
+              </section>
+
               <section className="report-metrics-grid option-backtest-metrics">
                 <MetricCard
                   label="Net PnL"
