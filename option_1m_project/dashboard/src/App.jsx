@@ -38,10 +38,6 @@ const OPTION_BACKTEST_ENTRY_SIGNALS = [
   { id: "SELL", label: "SELL" },
   { id: "BOTH", label: "Both" },
 ];
-const STRATEGY_FILTER_OPTIONS = [
-  { id: "all", label: "All" },
-  { id: "oneMinute", label: "1m Bot" },
-];
 const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
   { id: "oneMinuteBot", label: "1m Bot" },
@@ -53,21 +49,6 @@ const NAV_OPTIONS = [
   { id: "logs", label: "Logs" },
   { id: "optionBacktest", label: "Option Backtest" },
 ];
-const DAILY_SETUP_KEYS = {
-  oneMinuteBot: "option_contracts_1m",
-};
-const DEFAULT_DAILY_SETUP_FORM = {
-  contract1: "",
-  contract2: "",
-  entrySignal: "BUY",
-  scheduleStart: "09:20",
-  scheduleEnd: "15:00",
-  startingBalance: "100000",
-  targetPct: "3",
-  maxSignalCandlePct: "10",
-  stopLossMode: "signal_low",
-  stopLossPct: "8",
-};
 
 function parseIstDate(value) {
   if (!value) return null;
@@ -862,7 +843,7 @@ function ContractSignalList({ items, renderValue }) {
 }
 
 export function App() {
-  const [activeView, setActiveView] = useState("overview");
+  const [activeView, setActiveView] = useState("oneMinuteBot");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [theme, setTheme] = useState(
     () => window.localStorage.getItem("dashboard-theme") ?? "dark",
@@ -880,23 +861,23 @@ export function App() {
   const [selectedDate, setSelectedDate] = useState(getTodayInIst());
   const [streamStatus, setStreamStatus] = useState("connecting");
   const [zerodhaAuthBusy, setZerodhaAuthBusy] = useState(false);
-  const [contractForms, setContractForms] = useState({
-    option_contracts_1m: { ...DEFAULT_DAILY_SETUP_FORM },
+  const [contractForm, setContractForm] = useState({
+    contract1: "",
+    contract2: "",
+    entrySignal: "BUY",
+    scheduleStart: "09:20",
+    scheduleEnd: "15:00",
+    startingBalance: "100000",
+    targetPct: "3",
+    maxSignalCandlePct: "10",
+    stopLossMode: "signal_low",
+    stopLossPct: "8",
   });
-  const [setupEditorOpen, setSetupEditorOpen] = useState({});
+  const [setupEditorOpen, setSetupEditorOpen] = useState(false);
   const [addMoneyAmount, setAddMoneyAmount] = useState("");
   const [contractSaving, setContractSaving] = useState(false);
   const [overviewRange, setOverviewRange] = useState(
     () => window.localStorage.getItem("overview-range") ?? "today",
-  );
-  const [tradeStrategyFilter, setTradeStrategyFilter] = useState(
-    () => window.localStorage.getItem("trade-strategy-filter") ?? "all",
-  );
-  const [reportStrategyFilter, setReportStrategyFilter] = useState(
-    () => window.localStorage.getItem("report-strategy-filter") ?? "all",
-  );
-  const [logStrategyFilter, setLogStrategyFilter] = useState(
-    () => window.localStorage.getItem("log-strategy-filter") ?? "oneMinute",
   );
   const [showHourlyPnl, setShowHourlyPnl] = useState(
     () => window.localStorage.getItem("show-hourly-pnl") === "true",
@@ -941,8 +922,8 @@ export function App() {
   const [optionBacktestResult, setOptionBacktestResult] = useState(null);
   const [optionBacktestLoading, setOptionBacktestLoading] = useState(false);
   const [liveActionBusy, setLiveActionBusy] = useState("");
-  const dirtyContractStrategiesRef = useRef(new Set());
-  const hydratedSetupSignaturesRef = useRef({});
+  const contractFormDirtyRef = useRef(false);
+  const hydratedContractSignatureRef = useRef("");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -954,70 +935,53 @@ export function App() {
   }, [overviewRange]);
 
   useEffect(() => {
-    window.localStorage.setItem("trade-strategy-filter", tradeStrategyFilter);
-  }, [tradeStrategyFilter]);
-
-  useEffect(() => {
-    window.localStorage.setItem("report-strategy-filter", reportStrategyFilter);
-  }, [reportStrategyFilter]);
-
-  useEffect(() => {
-    window.localStorage.setItem("log-strategy-filter", logStrategyFilter);
-  }, [logStrategyFilter]);
-
-  useEffect(() => {
     window.localStorage.setItem("show-hourly-pnl", String(showHourlyPnl));
   }, [showHourlyPnl]);
 
   useEffect(() => {
-    const setups = data?.strategyConfig?.strategySetups;
-    if (!setups) return;
+    const effectiveContracts = data?.strategyConfig?.effectiveContracts;
+    if (!effectiveContracts) return;
+    const signature = JSON.stringify({
+      contract1: effectiveContracts.contract1 ?? "",
+      contract2: effectiveContracts.contract2 ?? "",
+      scheduleStart: data?.schedule?.start ?? "09:20",
+      scheduleEnd: data?.schedule?.end ?? "15:00",
+      startingBalance: data?.paperTrading?.startingBalance ?? data?.paperTrading?.capitalBase ?? 100000,
+      entrySignal: "BUY",
+      targetPct: data?.strategyConfig?.optionTargetPct ?? 3,
+      maxSignalCandlePct: data?.strategyConfig?.maxSignalCandlePct ?? 10,
+      stopLossMode: data?.strategyConfig?.stopLossMode ?? "signal_low",
+      stopLossPct: data?.strategyConfig?.stopLossPct ?? 8,
+      updatedAt: data?.strategyConfig?.dailyContracts?.updated_at ?? "",
+    });
+    if (contractFormDirtyRef.current) return;
+    if (hydratedContractSignatureRef.current === signature) return;
+    hydratedContractSignatureRef.current = signature;
 
-    setContractForms((current) => {
-      const next = { ...current };
-      let changed = false;
-      for (const strategyKey of Object.values(DAILY_SETUP_KEYS)) {
-        const setup = setups[strategyKey];
-        if (!setup) continue;
-        const signature = JSON.stringify({
-          contract1: setup.effectiveContracts?.contract1 ?? "",
-          contract2: setup.effectiveContracts?.contract2 ?? "",
-          scheduleStart: setup.scheduleStart ?? "09:20",
-          scheduleEnd: setup.scheduleEnd ?? "15:00",
-          startingBalance: setup.startingBalance ?? data?.paperTrading?.capitalBase ?? 100000,
-          entrySignal: "BUY",
-          targetPct: setup.targetPct ?? 3,
-          maxSignalCandlePct: setup.maxSignalCandlePct ?? 10,
-          stopLossMode: setup.stopLossMode ?? "signal_low",
-          stopLossPct: setup.stopLossPct ?? 8,
-          updatedAt: setup.dailyContracts?.updated_at ?? "",
-        });
-
-        if (dirtyContractStrategiesRef.current.has(strategyKey)) continue;
-        if (hydratedSetupSignaturesRef.current[strategyKey] === signature) continue;
-
-        hydratedSetupSignaturesRef.current[strategyKey] = signature;
-        next[strategyKey] = {
-          ...DEFAULT_DAILY_SETUP_FORM,
-          contract1: setup.effectiveContracts?.contract1 ?? "",
-          contract2: setup.effectiveContracts?.contract2 ?? "",
-          scheduleStart: setup.scheduleStart ?? "09:20",
-          scheduleEnd: setup.scheduleEnd ?? "15:00",
-          startingBalance: String(setup.startingBalance ?? data?.paperTrading?.capitalBase ?? 100000),
-          entrySignal: "BUY",
-          targetPct: String(setup.targetPct ?? 3),
-          maxSignalCandlePct: String(setup.maxSignalCandlePct ?? 10),
-          stopLossMode: setup.stopLossMode ?? "signal_low",
-          stopLossPct: String(setup.stopLossPct ?? 8),
-        };
-        changed = true;
-      }
-      return changed ? next : current;
+    setContractForm({
+      contract1: effectiveContracts.contract1 ?? "",
+      contract2: effectiveContracts.contract2 ?? "",
+      scheduleStart: data?.schedule?.start ?? "09:20",
+      scheduleEnd: data?.schedule?.end ?? "15:00",
+      startingBalance: String(data?.paperTrading?.startingBalance ?? data?.paperTrading?.capitalBase ?? 100000),
+      entrySignal: "BUY",
+      targetPct: String(data?.strategyConfig?.optionTargetPct ?? 3),
+      maxSignalCandlePct: String(data?.strategyConfig?.maxSignalCandlePct ?? 10),
+      stopLossMode: data?.strategyConfig?.stopLossMode ?? "signal_low",
+      stopLossPct: String(data?.strategyConfig?.stopLossPct ?? 8),
     });
   }, [
     data?.strategyConfig?.date,
+    data?.strategyConfig?.effectiveContracts?.contract1,
+    data?.strategyConfig?.effectiveContracts?.contract2,
+    data?.strategyConfig?.optionTargetPct,
+    data?.strategyConfig?.maxSignalCandlePct,
+    data?.strategyConfig?.stopLossMode,
+    data?.strategyConfig?.stopLossPct,
+    data?.paperTrading?.startingBalance,
     data?.paperTrading?.capitalBase,
-    data?.strategyConfig?.strategySetups,
+    data?.schedule?.start,
+    data?.schedule?.end,
   ]);
 
   useEffect(() => {
@@ -1096,7 +1060,7 @@ export function App() {
           marketQuotes: payload.marketQuotes ?? current?.marketQuotes ?? [],
         }));
       } catch {
-        // Keep the main dashboard stream as the fallback source.
+        // Keep the main dashboard stream as fallback.
       }
     };
 
@@ -1325,35 +1289,23 @@ export function App() {
     }));
   }
 
-  function updateContractField(strategyKey, field, value) {
+  function updateContractField(field, value) {
     const normalizedValue =
       field === "contract1" || field === "contract2"
         ? value.toUpperCase().replace(/\s+/g, "")
         : value;
-    dirtyContractStrategiesRef.current.add(strategyKey);
-    setContractForms((current) => ({
+    contractFormDirtyRef.current = true;
+    setContractForm((current) => ({
       ...current,
-      [strategyKey]: {
-        ...(current[strategyKey] ?? DEFAULT_DAILY_SETUP_FORM),
-        [field]: normalizedValue,
-      },
+      [field]: normalizedValue,
     }));
   }
 
-  function fillStartingBalanceFromCash(strategyKey) {
-    const balanceLeft = Number(
-      paperTrading.cashBalance ?? paperTrading.capitalBase ?? 100000,
-    );
-    if (!Number.isFinite(balanceLeft) || balanceLeft <= 0) return;
-    updateContractField(strategyKey, "startingBalance", String(Math.floor(balanceLeft)));
-  }
-
-  async function saveStrategyContracts(event, strategyKey = DAILY_SETUP_KEYS.oneMinuteBot) {
+  async function saveStrategyContracts(event) {
     event.preventDefault();
     setContractSaving(true);
     setActionMessage("");
     setError("");
-    const contractForm = contractForms[strategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
 
     try {
       const response = await fetch(apiUrl("/api/strategy/contracts"), {
@@ -1362,7 +1314,6 @@ export function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          strategyKey,
           ...contractForm,
           startingBalance: Number(contractForm.startingBalance),
           targetPct: Number(contractForm.targetPct),
@@ -1380,8 +1331,8 @@ export function App() {
 
       const payload = await response.json();
       setActionMessage(payload.message ?? "Contracts saved for today.");
-      dirtyContractStrategiesRef.current.delete(strategyKey);
-      hydratedSetupSignaturesRef.current[strategyKey] = "";
+      contractFormDirtyRef.current = false;
+      hydratedContractSignatureRef.current = "";
 
       const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
       if (dashboardResponse.ok) {
@@ -1620,6 +1571,9 @@ export function App() {
   const liveMargins = liveTrading.margins ?? {};
   const liveBalance = liveTrading.balance ?? {};
   const oneMinuteLiveSetup = strategyConfig.strategySetups?.option_contracts_1m ?? {};
+  const dailySetupSavedToday = Boolean(strategyConfig.usesDailyContracts);
+  const dailySetupSavedAt = strategyConfig.dailyContracts?.updated_at;
+  const dailySetupEditorOpen = setupEditorOpen || !dailySetupSavedToday;
   const activeTrade = paperTrading.activeTrade ?? null;
   const activeTrades = paperTrading.activeTrades ?? (activeTrade ? [activeTrade] : []);
   const tradeHistory = paperTrading.tradeHistory ?? [];
@@ -1639,24 +1593,17 @@ export function App() {
     OVERVIEW_RANGE_OPTIONS.find((option) => option.id === overviewRange) ??
     OVERVIEW_RANGE_OPTIONS[0];
   const winsLosses = `${formatCount(selectedRangeSummary.winCount)} / ${formatCount(selectedRangeSummary.lossCount)}`;
+  const hourlyPnlReport = buildHourlyPnlReport(tradeHistory, overviewRange);
+  const reportMetrics = buildReportMetrics(tradeHistory, overviewRange);
+  const weekdayPnlReport = buildWeekdayPnlReport(tradeHistory, overviewRange);
+  const optionTypeReport = buildOptionTypeReport(tradeHistory, overviewRange);
   const backtestTrades = backtestResult?.trades ?? [];
   const backtestHourlyPnlReport = buildHourlyPnlReport(backtestTrades, "total");
   const backtestWeekdayPnlReport = buildWeekdayPnlReport(backtestTrades, "total");
   const optionBacktestTrades = optionBacktestResult?.trades ?? [];
   const optionBacktestHourlyPnlReport = buildHourlyPnlReport(optionBacktestTrades, "total");
   const optionBacktestWeekdayPnlReport = buildWeekdayPnlReport(optionBacktestTrades, "total");
-  const isOneMinuteLog = (log) =>
-    String(log?.strategy_mode ?? "").toLowerCase() === "option_contracts" ||
-    String(log?.strategy_key ?? "").toLowerCase() === "option_contracts_1m" ||
-    String(log?.interval ?? "").toLowerCase() === "1m";
-  const filteredLogs =
-    logStrategyFilter === "oneMinute"
-      ? logs.filter(isOneMinuteLog)
-      : logs;
-  const selectedLogFilterMeta =
-    STRATEGY_FILTER_OPTIONS.find((option) => option.id === logStrategyFilter) ??
-    STRATEGY_FILTER_OPTIONS[1];
-  const logCounts = filteredLogs.reduce(
+  const logCounts = logs.reduce(
     (counts, log) => {
       const statusValue = String(log.status ?? "unknown").toLowerCase();
       counts.total += 1;
@@ -1690,22 +1637,6 @@ export function App() {
     "option_contracts";
   const oneMinuteOptionTrades = tradeHistory.filter(isOneMinuteOptionTrade);
   const oneMinuteActiveTrades = activeTrades.filter(isOneMinuteOptionTrade);
-  const filterTradesByStrategy = (filterId) => {
-    if (filterId === "oneMinute") return oneMinuteOptionTrades;
-    return tradeHistory;
-  };
-  const filteredTradeHistory = filterTradesByStrategy(tradeStrategyFilter);
-  const reportTrades = filterTradesByStrategy(reportStrategyFilter);
-  const selectedTradeFilterMeta =
-    STRATEGY_FILTER_OPTIONS.find((option) => option.id === tradeStrategyFilter) ??
-    STRATEGY_FILTER_OPTIONS[0];
-  const selectedReportFilterMeta =
-    STRATEGY_FILTER_OPTIONS.find((option) => option.id === reportStrategyFilter) ??
-    STRATEGY_FILTER_OPTIONS[0];
-  const hourlyPnlReport = buildHourlyPnlReport(reportTrades, overviewRange);
-  const reportMetrics = buildReportMetrics(reportTrades, overviewRange);
-  const weekdayPnlReport = buildWeekdayPnlReport(reportTrades, overviewRange);
-  const optionTypeReport = buildOptionTypeReport(reportTrades, overviewRange);
 
   function buildBotPageSummary(trades, currentActiveTrades) {
     const rangeTrades = filterTradesForRange(trades, overviewRange);
@@ -1918,24 +1849,12 @@ export function App() {
     title,
     subtitle,
     scheduleLabel,
-    strategyKey,
     trades,
     currentActiveTrades,
     summary,
     showContracts,
   }) {
     const firstActiveTrade = currentActiveTrades[0] ?? null;
-    const setupForm = contractForms[strategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
-    const setupConfig = data?.strategyConfig?.strategySetups?.[strategyKey] ?? {};
-    const setupTitle = showContracts ? "1m daily setup" : "5m daily setup";
-    const setupSavedToday = Boolean(setupConfig.usesDailySetup);
-    const setupSavedAt = setupConfig.dailyContracts?.updated_at;
-    const editorOpen = setupEditorOpen[strategyKey] ?? !setupSavedToday;
-    const setupSubtitle = showContracts
-      ? setupSavedToday
-        ? "Today's setup is saved. Edit the fields below and save again to update the same setup."
-        : "Today's setup is not set. Save the two option contracts and risk settings before the bot scans."
-      : "Save the trading window, balance, and risk settings used by the 5-minute bot today.";
     return (
       <section className="section-block">
         <div className="section-heading">
@@ -2060,245 +1979,6 @@ export function App() {
           </article>
           </section>
         ) : null}
-
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-title">{setupTitle}</p>
-              <p className="panel-subtitle">{setupSubtitle}</p>
-            </div>
-          </div>
-
-          {showContracts ? (
-            <div className={`setup-status ${setupSavedToday ? "setup-status--saved" : "setup-status--missing"}`}>
-              <div>
-                <p className="setup-status__title">
-                  {setupSavedToday ? "Today's 1m setup is saved" : "Today's 1m setup is not set"}
-                </p>
-                <p className="setup-status__copy">
-                  {setupSavedToday
-                    ? `Editing this form will update the setup for ${setupConfig.date ?? "today"}.`
-                    : "The bot will not have daily contract inputs until you save Contract 1 and Contract 2 for today."}
-                </p>
-              </div>
-              <span className="setup-status__pill">
-                {setupSavedToday ? "Saved" : "Not set"}
-              </span>
-            </div>
-          ) : null}
-
-          <div className="setup-editor-toggle-row">
-            <button
-              type="button"
-              className="action-button action-button--secondary"
-              onClick={() =>
-                setSetupEditorOpen((current) => ({
-                  ...current,
-                  [strategyKey]: !editorOpen,
-                }))
-              }
-            >
-              {editorOpen ? "Hide Update Section" : setupSavedToday ? "Edit Setup" : "Add Setup"}
-            </button>
-          </div>
-
-          {editorOpen ? (
-            <form
-              className="backtest-form contract-form"
-              onSubmit={(event) => saveStrategyContracts(event, strategyKey)}
-            >
-            {showContracts ? (
-              <>
-                <label className="form-field">
-                  Contract 1
-                  <input
-                    type="text"
-                    value={setupForm.contract1}
-                    placeholder="24000PE"
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "contract1", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="form-field">
-                  Contract 2
-                  <input
-                    type="text"
-                    value={setupForm.contract2}
-                    placeholder="24100CE"
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "contract2", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="form-field">
-                  Entry Signal
-                  <input type="text" value="BUY only" readOnly />
-                </label>
-              </>
-            ) : null}
-            <label className="form-field">
-              Start Time
-              <input
-                type="time"
-                value={setupForm.scheduleStart}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "scheduleStart", event.target.value)
-                }
-              />
-            </label>
-            <label className="form-field">
-              End Time
-              <input
-                type="time"
-                value={setupForm.scheduleEnd}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "scheduleEnd", event.target.value)
-                }
-              />
-            </label>
-            <label className="form-field">
-              <span className="form-field__label-row">
-                Starting Balance
-                {showContracts ? (
-                  <button
-                    type="button"
-                    className="field-mini-button"
-                    onClick={() => fillStartingBalanceFromCash(strategyKey)}
-                  >
-                    Use balance left
-                  </button>
-                ) : null}
-              </span>
-              <input
-                type="number"
-                min="1"
-                value={setupForm.startingBalance}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "startingBalance", event.target.value)
-                }
-              />
-            </label>
-            <label className="form-field">
-              Target %
-              <input
-                type="number"
-                min="0.1"
-                step="0.1"
-                value={setupForm.targetPct}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "targetPct", event.target.value)
-                }
-              />
-            </label>
-            {showContracts ? (
-              <>
-                <label className="form-field">
-                  Max Body %
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.1"
-                    value={setupForm.maxSignalCandlePct}
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "maxSignalCandlePct", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="form-field">
-                  SL Mode
-                  <select
-                    value={setupForm.stopLossMode}
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "stopLossMode", event.target.value)
-                    }
-                  >
-                    <option value="signal_low">Signal Low</option>
-                    <option value="percent">Fixed %</option>
-                  </select>
-                </label>
-                <label className="form-field">
-                  SL %
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.1"
-                    value={setupForm.stopLossPct}
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "stopLossPct", event.target.value)
-                    }
-                  />
-                </label>
-              </>
-            ) : null}
-            <button
-              type="submit"
-              className="action-button"
-              disabled={contractSaving}
-            >
-              {contractSaving ? "Saving..." : setupSavedToday ? "Update Setup" : "Save Setup"}
-            </button>
-            </form>
-          ) : null}
-
-          <dl className="status-list contract-status-list">
-            <div>
-              <dt>Valid Date</dt>
-              <dd>{setupConfig.date ?? "Not available"}</dd>
-            </div>
-            <div>
-              <dt>Saved Today</dt>
-              <dd>{setupSavedToday ? "Yes" : "No"}</dd>
-            </div>
-            {showContracts ? (
-              <div>
-                <dt>Last Saved</dt>
-                <dd>{setupSavedAt ? formatDateTime(setupSavedAt) : "Not set today"}</dd>
-              </div>
-            ) : null}
-            {showContracts ? (
-              <div>
-                <dt>Entry Signal</dt>
-                <dd>{setupConfig.entrySignal ?? "Not set"}</dd>
-              </div>
-            ) : null}
-            {showContracts ? (
-              <div>
-                <dt>Target / SL</dt>
-                <dd>
-                  {setupConfig.targetPct ?? "-"}% /{" "}
-                  {formatSnakeLabel(setupConfig.stopLossMode ?? "not_set")}
-                  {setupConfig.stopLossMode === "percent" ? ` ${setupConfig.stopLossPct ?? "-"}%` : ""}
-                </dd>
-              </div>
-            ) : null}
-            {showContracts ? (
-              <div>
-                <dt>Max Body</dt>
-                <dd>{setupConfig.maxSignalCandlePct ?? "-"}%</dd>
-              </div>
-            ) : null}
-            <div>
-              <dt>Starting Balance</dt>
-              <dd>{formatCurrency(setupConfig.startingBalance)}</dd>
-            </div>
-            <div>
-              <dt>Window</dt>
-              <dd>
-                {setupConfig.scheduleStart ?? "-"} - {setupConfig.scheduleEnd ?? "-"}
-              </dd>
-            </div>
-            {showContracts ? (
-              <div>
-                <dt>Contracts</dt>
-                <dd>
-                  {setupConfig.effectiveContracts?.contract1 || "-"} /{" "}
-                  {setupConfig.effectiveContracts?.contract2 || "-"}
-                </dd>
-              </div>
-            ) : null}
-          </dl>
-        </section>
 
         <section className="content-grid">
           <article className="panel">
@@ -2457,7 +2137,7 @@ export function App() {
       <section className="top-nav">
         <div className="brand-mark" aria-label="NIFTY Signal Dashboard">
           <img src="/app-icon.svg" alt="" />
-          <span>NIFTY Bot</span>
+          <span>1m Option Bot</span>
         </div>
         <div className="nav-group">
           {NAV_OPTIONS.map((option) => (
@@ -2510,7 +2190,7 @@ export function App() {
       <section className="hero">
         <div>
           <p className="eyebrow">NIFTY Signal Control Room</p>
-          <h1>Live NIFTY paper trading and signal dashboard.</h1>
+          <h1>Live 1-minute option paper trading dashboard.</h1>
           <p className="hero-copy">
             {activeView === "overview"
               ? "A compact daily view for market quotes, selected contracts, active trade state, and PnL."
@@ -2640,6 +2320,230 @@ export function App() {
                 tone={activeTrade ? "warn" : "neutral"}
               />
             </section>
+          </section>
+
+          <section id="strategy-contracts" className="section-block">
+            <div className="section-heading">
+              <p className="eyebrow">Daily Setup</p>
+              <h2 className="section-title">Option contracts for today</h2>
+            </div>
+
+            <article className="panel">
+              <div className="panel-header">
+                <div>
+                  <p className="panel-title">Contract inputs</p>
+                  <p className="panel-subtitle">
+                    {dailySetupSavedToday
+                      ? "Today's setup is saved. Edit the fields below and save again to update the same setup."
+                      : "Today's setup is not set. Save Contract 1 and Contract 2 before the bot starts scanning."}
+                  </p>
+                </div>
+              </div>
+
+              <div className={`setup-status ${dailySetupSavedToday ? "setup-status--saved" : "setup-status--missing"}`}>
+                <div>
+                  <p className="setup-status__title">
+                    {dailySetupSavedToday ? "Today's 1m setup is saved" : "Today's 1m setup is not set"}
+                  </p>
+                  <p className="setup-status__copy">
+                    {dailySetupSavedToday
+                      ? `Editing this form will update the setup for ${strategyConfig.date ?? "today"}.`
+                      : "The bot will not use daily contract inputs until this setup is saved for today."}
+                  </p>
+                </div>
+                <span className="setup-status__pill">
+                  {dailySetupSavedToday ? "Saved" : "Not set"}
+                </span>
+              </div>
+
+              <div className="setup-editor-toggle-row">
+                <button
+                  type="button"
+                  className="action-button action-button--secondary"
+                  onClick={() => setSetupEditorOpen((isOpen) => !isOpen)}
+                >
+                  {dailySetupEditorOpen
+                    ? "Hide Update Section"
+                    : dailySetupSavedToday
+                      ? "Edit Setup"
+                      : "Add Setup"}
+                </button>
+              </div>
+
+              {dailySetupEditorOpen ? (
+              <form className="backtest-form contract-form" onSubmit={saveStrategyContracts}>
+                <label className="form-field">
+                  Contract 1
+                  <input
+                    type="text"
+                    value={contractForm.contract1}
+                    placeholder="24000PE"
+                    onChange={(event) =>
+                      updateContractField("contract1", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  Contract 2
+                  <input
+                    type="text"
+                    value={contractForm.contract2}
+                    placeholder="24100CE"
+                    onChange={(event) =>
+                      updateContractField("contract2", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  Entry Signal
+                  <input type="text" value="BUY only" readOnly />
+                </label>
+                <label className="form-field">
+                  Start Time
+                  <input
+                    type="time"
+                    value={contractForm.scheduleStart}
+                    onChange={(event) =>
+                      updateContractField("scheduleStart", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  End Time
+                  <input
+                    type="time"
+                    value={contractForm.scheduleEnd}
+                    onChange={(event) =>
+                      updateContractField("scheduleEnd", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  Starting Balance
+                  <input
+                    type="number"
+                    min="1"
+                    value={contractForm.startingBalance}
+                    onChange={(event) =>
+                      updateContractField("startingBalance", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  Target %
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    value={contractForm.targetPct}
+                    onChange={(event) =>
+                      updateContractField("targetPct", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  Max Body %
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    value={contractForm.maxSignalCandlePct}
+                    onChange={(event) =>
+                      updateContractField("maxSignalCandlePct", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  SL Mode
+                  <select
+                    value={contractForm.stopLossMode}
+                    onChange={(event) =>
+                      updateContractField("stopLossMode", event.target.value)
+                    }
+                  >
+                    <option value="signal_low">Signal Low</option>
+                    <option value="percent">Fixed %</option>
+                  </select>
+                </label>
+                <label className="form-field">
+                  SL %
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    value={contractForm.stopLossPct}
+                    onChange={(event) =>
+                      updateContractField("stopLossPct", event.target.value)
+                    }
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="action-button"
+                  disabled={contractSaving}
+                >
+                  {contractSaving ? "Saving..." : dailySetupSavedToday ? "Update Today's Setup" : "Save for Today"}
+                </button>
+              </form>
+              ) : null}
+
+              <dl className="status-list contract-status-list">
+                <div>
+                  <dt>Strategy Mode</dt>
+                  <dd>{formatSnakeLabel(strategyConfig.mode ?? "index")}</dd>
+                </div>
+                <div>
+                  <dt>Valid Date</dt>
+                  <dd>{strategyConfig.date ?? "Not available"}</dd>
+                </div>
+                <div>
+                  <dt>Saved Today</dt>
+                  <dd>{dailySetupSavedToday ? "Yes" : "No"}</dd>
+                </div>
+                <div>
+                  <dt>Last Saved</dt>
+                  <dd>{dailySetupSavedAt ? formatDateTime(dailySetupSavedAt) : "Not set today"}</dd>
+                </div>
+                <div>
+                  <dt>Effective Contracts</dt>
+                  <dd>
+                    {strategyConfig.effectiveContracts?.contract1 || "-"} /{" "}
+                    {strategyConfig.effectiveContracts?.contract2 || "-"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Entry Signal</dt>
+                  <dd>{strategyConfig.entrySignal ?? "Not set"}</dd>
+                </div>
+                <div>
+                  <dt>Window</dt>
+                  <dd>{strategyConfig.scheduleStart ?? schedule.start ?? "-"} - {strategyConfig.scheduleEnd ?? schedule.end ?? "-"}</dd>
+                </div>
+                <div>
+                  <dt>Target / SL</dt>
+                  <dd>
+                    {strategyConfig.optionTargetPct ?? "-"}% /{" "}
+                    {formatSnakeLabel(strategyConfig.stopLossMode ?? "not_set")}
+                    {strategyConfig.stopLossMode === "percent" ? ` ${strategyConfig.stopLossPct ?? "-"}%` : ""}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Max Body</dt>
+                  <dd>{strategyConfig.maxSignalCandlePct ?? "-"}%</dd>
+                </div>
+                <div>
+                  <dt>Starting Balance</dt>
+                  <dd>{formatCurrency(strategyConfig.dailyContracts?.starting_balance ?? paperTrading.startingBalance ?? paperTrading.capitalBase)}</dd>
+                </div>
+              </dl>
+
+              {!["option_contracts", "both"].includes(strategyConfig.mode) ? (
+                <p className="panel-note">
+                  Set <code>STRATEGY_MODE=option_contracts</code> in `.env`
+                  for the live bot to use these dashboard contracts.
+                </p>
+              ) : null}
+            </article>
           </section>
 
           <section id="paper-trading" className="section-block">
@@ -3123,8 +3027,7 @@ export function App() {
           title: "1m option-contract execution",
           subtitle:
             "Focused view for the two-contract option strategy running on 1-minute candles.",
-          scheduleLabel: "Every 1 min at +2s",
-          strategyKey: DAILY_SETUP_KEYS.oneMinuteBot,
+          scheduleLabel: "Every 1 min at +3s",
           trades: oneMinuteOptionTrades,
           currentActiveTrades: oneMinuteActiveTrades,
           summary: oneMinuteBotSummary,
@@ -3137,32 +3040,13 @@ export function App() {
             <h2 className="section-title">Trade history</h2>
           </div>
 
-          <div
-            className="range-switcher"
-            role="tablist"
-            aria-label="Trade history strategy filter"
-          >
-            {STRATEGY_FILTER_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={`range-chip ${tradeStrategyFilter === option.id ? "range-chip--active" : ""}`}
-                onClick={() => setTradeStrategyFilter(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
           <section className="panel">
             <div className="panel-header">
               <div>
-                <p className="panel-title">
-                  Completed Trades · {selectedTradeFilterMeta.label}
-                </p>
+                <p className="panel-title">Completed Trades</p>
                 <p className="panel-subtitle">
                   Entry, exit, risk levels, capital, and net PnL for completed
-                  paper trades in this strategy view.
+                  paper trades.
                 </p>
               </div>
               <ColumnPicker
@@ -3185,7 +3069,7 @@ export function App() {
               />
             </div>
 
-            {filteredTradeHistory.length ? (
+            {tradeHistory.length ? (
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -3196,7 +3080,7 @@ export function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredTradeHistory.map((trade) => (
+                    {tradeHistory.map((trade) => (
                       <tr key={trade.trade_id}>
                         {visibleTradeHistoryColumns.map((column) => {
                           if (column.id === "signal")
@@ -3296,7 +3180,7 @@ export function App() {
               </div>
             ) : (
               <p className="empty-copy">
-                No completed paper trades found for {selectedTradeFilterMeta.label}.
+                Completed paper trades will appear here after the first exit.
               </p>
             )}
           </section>
@@ -3467,11 +3351,7 @@ export function App() {
                       ? "Turn Off Live Trading"
                       : "Turn On Live Trading"}
                 </button>
-                <button
-                  type="button"
-                  className="action-button action-button--secondary"
-                  onClick={refreshLiveTradingData}
-                >
+                <button type="button" className="action-button action-button--secondary" onClick={refreshLiveTradingData}>
                   Refresh Broker Data
                 </button>
               </div>
@@ -3526,19 +3406,7 @@ export function App() {
             {liveOrders.length ? (
               <div className="table-wrap">
                 <table>
-                  <thead>
-                    <tr>
-                      <th>Order ID</th>
-                      <th>Time</th>
-                      <th>Symbol</th>
-                      <th>Side</th>
-                      <th>Qty</th>
-                      <th>Type</th>
-                      <th>Status</th>
-                      <th>Avg Price</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
+                  <thead><tr><th>Order ID</th><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th>Avg Price</th><th>Actions</th></tr></thead>
                   <tbody>
                     {liveOrders.map((order) => (
                       <tr key={order.order_id}>
@@ -3550,16 +3418,7 @@ export function App() {
                         <td>{order.order_type}</td>
                         <td>{order.status}</td>
                         <td>{formatCurrency(order.average_price)}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="table-action-button table-action-button--danger"
-                            disabled={!liveTradingStatus.enabled || liveActionBusy === `cancel-${order.order_id}`}
-                            onClick={() => cancelLiveOrder(order.order_id)}
-                          >
-                            {liveActionBusy === `cancel-${order.order_id}` ? "Cancelling..." : "Cancel"}
-                          </button>
-                        </td>
+                        <td><button type="button" className="table-action-button table-action-button--danger" disabled={!liveTradingStatus.enabled || liveActionBusy === `cancel-${order.order_id}`} onClick={() => cancelLiveOrder(order.order_id)}>{liveActionBusy === `cancel-${order.order_id}` ? "Cancelling..." : "Cancel"}</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -3571,24 +3430,8 @@ export function App() {
           </section>
 
           <section className="content-grid">
-            <article className="panel">
-              <div className="panel-header">
-                <div>
-                  <p className="panel-title">Positions</p>
-                  <p className="panel-subtitle">Open positions from Zerodha.</p>
-                </div>
-              </div>
-              <pre className="json-preview">{JSON.stringify(livePositions, null, 2)}</pre>
-            </article>
-            <article className="panel">
-              <div className="panel-header">
-                <div>
-                  <p className="panel-title">Margins</p>
-                  <p className="panel-subtitle">Margin snapshot from Zerodha.</p>
-                </div>
-              </div>
-              <pre className="json-preview">{JSON.stringify(liveMargins, null, 2)}</pre>
-            </article>
+            <article className="panel"><div className="panel-header"><div><p className="panel-title">Positions</p><p className="panel-subtitle">Open positions from Zerodha.</p></div></div><pre className="json-preview">{JSON.stringify(livePositions, null, 2)}</pre></article>
+            <article className="panel"><div className="panel-header"><div><p className="panel-title">Margins</p><p className="panel-subtitle">Margin snapshot from Zerodha.</p></div></div><pre className="json-preview">{JSON.stringify(liveMargins, null, 2)}</pre></article>
           </section>
         </section>
       ) : activeView === "broker" ? (
@@ -3717,23 +3560,6 @@ export function App() {
           <div
             className="range-switcher"
             role="tablist"
-            aria-label="Reports strategy filter"
-          >
-            {STRATEGY_FILTER_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={`range-chip ${reportStrategyFilter === option.id ? "range-chip--active" : ""}`}
-                onClick={() => setReportStrategyFilter(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
-          <div
-            className="range-switcher"
-            role="tablist"
             aria-label="Reports range"
           >
             {OVERVIEW_RANGE_OPTIONS.map((option) => (
@@ -3813,7 +3639,7 @@ export function App() {
                 <p className="panel-title">Hourly PnL Report</p>
                 <p className="panel-subtitle">
                   Win/loss distribution by exit hour from 09:00 to 16:00 IST for
-                  {` ${selectedReportFilterMeta.label} in the selected range.`}
+                  the selected range.
                 </p>
               </div>
               <label className="toggle-control">
@@ -3837,7 +3663,7 @@ export function App() {
                 <p className="panel-title">Weekday PnL Report</p>
                 <p className="panel-subtitle">
                   Net PnL grouped by weekday from Monday to Friday for the
-                  {` ${selectedReportFilterMeta.label} selection.`}
+                  selected range.
                 </p>
               </div>
             </div>
@@ -3849,8 +3675,7 @@ export function App() {
               <div>
                 <p className="panel-title">CE / PE Trade Details</p>
                 <p className="panel-subtitle">
-                  Option-type breakdown for
-                  {` ${selectedReportFilterMeta.label} in the selected range.`}
+                  Option-type breakdown for the selected range.
                 </p>
               </div>
             </div>
@@ -4848,23 +4673,6 @@ export function App() {
             </div>
           </div>
 
-          <div
-            className="range-switcher"
-            role="tablist"
-            aria-label="Run logs strategy filter"
-          >
-            {STRATEGY_FILTER_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={`range-chip ${logStrategyFilter === option.id ? "range-chip--active" : ""}`}
-                onClick={() => setLogStrategyFilter(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
           <section className="log-summary-grid">
             <MetricCard
               label="Stream"
@@ -4889,7 +4697,7 @@ export function App() {
 
           {logsLoading ? (
             <p className="empty-copy">Loading run logs...</p>
-          ) : filteredLogs.length ? (
+          ) : logs.length ? (
             <div className="table-wrap">
               <table>
                 <thead>
@@ -4900,7 +4708,7 @@ export function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredLogs.map((log) => (
+                  {logs.map((log) => (
                     <tr key={`${log.run_at}-${log.status}-${log.message}`}>
                       {visibleRunLogColumns.map((column) => {
                         const contractSignals = getLogContractSignals(log);
@@ -5086,9 +4894,7 @@ export function App() {
               </table>
             </div>
           ) : (
-            <p className="empty-copy">
-              No {selectedLogFilterMeta.label} run logs found for {selectedDate}.
-            </p>
+            <p className="empty-copy">No run logs found for {selectedDate}.</p>
           )}
         </section>
       )}

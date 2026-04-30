@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -10,15 +11,18 @@ from typing import Any
 import yfinance as yf
 
 from nifty_alert_bot.data import fetch_latest_price
+from nifty_alert_bot.instruments import get_instrument_spec
 
 
 logger = logging.getLogger(__name__)
 
 try:
     from kiteconnect import KiteConnect, KiteTicker
+    from kiteconnect.exceptions import TokenException
 except ImportError:  # pragma: no cover - optional dependency
     KiteConnect = None
     KiteTicker = None
+    TokenException = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,32 @@ def _parse_expiry(value: Any) -> date | None:
     if isinstance(value, str):
         return datetime.fromisoformat(value).date()
     return None
+
+
+def _is_token_error(exc: Exception) -> bool:
+    return bool(
+        (TokenException is not None and isinstance(exc, TokenException))
+        or "access_token" in str(exc).lower()
+        or "api_key" in str(exc).lower()
+    )
+
+
+def _kite_interval(interval: str) -> str:
+    return {
+        "1m": "minute",
+        "1minute": "minute",
+        "minute": "minute",
+        "3m": "3minute",
+        "5m": "5minute",
+        "5minute": "5minute",
+        "10m": "10minute",
+        "15m": "15minute",
+        "30m": "30minute",
+        "60m": "60minute",
+        "1h": "60minute",
+        "day": "day",
+        "1d": "day",
+    }.get(str(interval).strip().lower(), interval)
 
 
 class OptionPriceProvider:
@@ -99,16 +129,21 @@ class OptionPriceProvider:
                 "niftyLtp": quote.get("last_price"),
             }
         except Exception as exc:
-            logger.exception("Zerodha health check failed.")
+            message = str(exc)
+            if _is_token_error(exc):
+                logger.info("Zerodha health check skipped: invalid or expired access token.")
+                message = "Zerodha access token is expired or invalid. Generate a fresh token to enable Zerodha data."
+            else:
+                logger.exception("Zerodha health check failed.")
             return {
                 "ok": False,
-                "message": str(exc),
+                "message": message,
             }
 
     def index_quotes(self) -> list[dict[str, Any]]:
         instruments = [
-            {"name": "NIFTY 50", "key": "NSE:NIFTY 50", "fallback_symbol": "^NSEI"},
-            {"name": "SENSEX", "key": "BSE:SENSEX", "fallback_symbol": "^BSESN"},
+            {"id": "NIFTY", "name": "NIFTY 50", "key": "NSE:NIFTY 50", "fallback_symbol": "^NSEI"},
+            {"id": "SENSEX", "name": "SENSEX", "key": "BSE:SENSEX", "fallback_symbol": "^BSESN"},
         ]
 
         if self.zerodha_available:
@@ -134,12 +169,16 @@ class OptionPriceProvider:
                             "change": change,
                             "changePct": change_pct,
                             "source": "zerodha_rest",
+                            "sparkline": self._index_sparkline(item),
                             "updatedAt": datetime.now(self.settings.timezone).isoformat(),
                         }
                     )
                 return quotes
-            except Exception:
-                logger.exception("Zerodha index quote fetch failed. Falling back to yfinance.")
+            except Exception as exc:
+                if _is_token_error(exc):
+                    logger.info("Zerodha index quote fetch skipped: invalid or expired access token. Falling back to yfinance.")
+                else:
+                    logger.exception("Zerodha index quote fetch failed. Falling back to yfinance.")
 
         quotes = []
         for item in instruments:
@@ -166,6 +205,7 @@ class OptionPriceProvider:
                         "change": change,
                         "changePct": change_pct,
                         "source": "yfinance",
+                        "sparkline": self._index_sparkline(item),
                         "updatedAt": datetime.now(self.settings.timezone).isoformat(),
                     }
                 )
@@ -175,11 +215,99 @@ class OptionPriceProvider:
                         "name": item["name"],
                         "ltp": None,
                         "source": "unavailable",
+                        "sparkline": [],
                         "updatedAt": datetime.now(self.settings.timezone).isoformat(),
                         "error": str(exc),
                     }
                 )
         return quotes
+
+    def _index_sparkline(self, item: dict[str, Any], limit: int = 36) -> list[dict[str, Any]]:
+        now = datetime.now(self.settings.timezone)
+
+        if self.zerodha_available:
+            try:
+                instrument = get_instrument_spec(item["id"])
+                candles = self.historical_index_candles(
+                    instrument,
+                    now - timedelta(hours=5),
+                    now,
+                    "5m",
+                )
+                points = [
+                    {
+                        "time": candle["date"].isoformat() if hasattr(candle.get("date"), "isoformat") else str(candle.get("date")),
+                        "close": round(float(candle["close"]), 2),
+                    }
+                    for candle in candles[-limit:]
+                    if candle.get("close") is not None
+                ]
+                if points:
+                    return points
+            except Exception:
+                logger.debug("Zerodha sparkline fetch failed for %s.", item.get("name"), exc_info=True)
+
+        try:
+            frame = yf.download(
+                tickers=item["fallback_symbol"],
+                interval="5m",
+                period="1d",
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+            if hasattr(frame.columns, "get_level_values"):
+                frame.columns = frame.columns.get_level_values(0)
+            frame = frame.dropna()
+            return [
+                {
+                    "time": index.isoformat() if hasattr(index, "isoformat") else str(index),
+                    "close": round(float(row["Close"]), 2),
+                }
+                for index, row in frame.tail(limit).iterrows()
+            ]
+        except Exception:
+            logger.debug("yfinance sparkline fetch failed for %s.", item.get("name"), exc_info=True)
+            return []
+
+    def historical_index_candles(
+        self,
+        instrument,
+        from_dt: datetime,
+        to_dt: datetime,
+        interval: str,
+    ) -> list[dict[str, Any]]:
+        if not self.zerodha_available:
+            return []
+
+        from_ist = from_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+        to_ist = to_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+
+        try:
+            return self._get_kite().historical_data(
+                int(instrument.zerodha_index_token),
+                from_ist.strftime("%Y-%m-%d %H:%M:%S"),
+                to_ist.strftime("%Y-%m-%d %H:%M:%S"),
+                _kite_interval(interval),
+                continuous=False,
+                oi=False,
+            )
+        except Exception as exc:
+            if _is_token_error(exc):
+                logger.info(
+                    "Skipped Zerodha %s historical candles for %s: invalid or expired access token.",
+                    interval,
+                    instrument.label,
+                )
+            else:
+                logger.exception(
+                    "Failed to fetch Zerodha %s historical candles for %s from %s to %s.",
+                    interval,
+                    instrument.label,
+                    from_ist,
+                    to_ist,
+                )
+            return []
 
     def resolve_contract(self, strike: int, option_type: str, as_of: datetime) -> OptionContract | None:
         if not self.zerodha_available:
@@ -187,8 +315,11 @@ class OptionPriceProvider:
 
         try:
             rows = self._load_option_instruments()
-        except Exception:
-            logger.exception("Unable to load Zerodha option instruments. Falling back to synthetic pricing.")
+        except Exception as exc:
+            if _is_token_error(exc):
+                logger.info("Zerodha option instruments unavailable: invalid or expired access token. Falling back to synthetic pricing.")
+            else:
+                logger.exception("Unable to load Zerodha option instruments. Falling back to synthetic pricing.")
             return None
 
         today = as_of.date()
@@ -228,6 +359,58 @@ class OptionPriceProvider:
             expiry=expiry_value.isoformat() if expiry_value is not None else "",
         )
 
+    def find_contract_by_symbol(self, tradingsymbol: str, exchange: str | None = None) -> OptionContract | None:
+        if not self.zerodha_available:
+            return None
+
+        target_symbol = str(tradingsymbol or "").strip().upper()
+        if not target_symbol:
+            return None
+
+        try:
+            rows = self._load_option_instruments(exchange=exchange)
+        except Exception as exc:
+            if _is_token_error(exc):
+                logger.info("Zerodha option instruments unavailable: invalid or expired access token.")
+            else:
+                logger.exception("Unable to load Zerodha option instruments for manual contract lookup.")
+            return None
+
+        for item in rows:
+            if str(item.get("tradingsymbol", "")).strip().upper() != target_symbol:
+                continue
+
+            expiry_value = _parse_expiry(item.get("expiry"))
+            return OptionContract(
+                exchange=str(item.get("exchange") or exchange or self.settings.zerodha_option_exchange),
+                tradingsymbol=str(item["tradingsymbol"]),
+                instrument_token=int(item["instrument_token"]),
+                strike=int(round(float(item.get("strike", 0) or 0))),
+                option_type=str(item.get("instrument_type", "")).upper(),
+                expiry=expiry_value.isoformat() if expiry_value is not None else "",
+            )
+
+        logger.warning("No Zerodha option instrument found for manual symbol %s.", target_symbol)
+        return None
+
+    def resolve_contract_input(
+        self,
+        contract_input: str,
+        as_of: datetime,
+        exchange: str | None = None,
+    ) -> OptionContract | None:
+        normalized = str(contract_input or "").strip().upper().replace(" ", "")
+        if not normalized:
+            return None
+
+        compact_match = re.fullmatch(r"(\d+)(CE|PE)", normalized)
+        if compact_match:
+            strike = int(compact_match.group(1))
+            option_type = compact_match.group(2)
+            return self.resolve_contract(strike, option_type, as_of)
+
+        return self.find_contract_by_symbol(normalized, exchange)
+
     def quote_trade(self, trade: dict[str, Any], *, prefer_stream: bool = True) -> tuple[float, str]:
         contract = None
         if trade.get("instrument_exchange") and trade.get("option_symbol") and trade.get("instrument_token"):
@@ -242,7 +425,11 @@ class OptionPriceProvider:
         elif trade.get("strike") and trade.get("option_type"):
             contract = self.resolve_contract(int(trade["strike"]), str(trade["option_type"]), datetime.now(self.settings.timezone))
 
-        spot = fetch_latest_price(self.settings.symbol)
+        spot = (
+            0.0
+            if contract is not None and self.zerodha_available
+            else fetch_latest_price(self.settings.symbol)
+        )
         return self.quote_option(
             float(spot),
             int(trade["strike"]),
@@ -290,14 +477,20 @@ class OptionPriceProvider:
                 continuous=False,
                 oi=False,
             )
-        except Exception:
-            logger.exception(
-                "Failed to fetch option candle for %s at %s (from=%s to=%s).",
-                contract.tradingsymbol,
-                candle_start_ist,
-                from_date,
-                to_date,
-            )
+        except Exception as exc:
+            if _is_token_error(exc):
+                logger.info(
+                    "Skipped option candle fetch for %s: invalid or expired Zerodha access token.",
+                    contract.tradingsymbol,
+                )
+            else:
+                logger.exception(
+                    "Failed to fetch option candle for %s at %s (from=%s to=%s).",
+                    contract.tradingsymbol,
+                    candle_start_ist,
+                    from_date,
+                    to_date,
+                )
             return None
 
         if not candles:
@@ -312,6 +505,45 @@ class OptionPriceProvider:
 
         return None
 
+    def historical_option_candles(
+        self,
+        contract: OptionContract,
+        from_dt: datetime,
+        to_dt: datetime,
+        interval: str = "minute",
+    ) -> list[dict[str, Any]]:
+        if not self.zerodha_available:
+            return []
+
+        from_ist = from_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+        to_ist = to_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+
+        try:
+            return self._get_kite().historical_data(
+                contract.instrument_token,
+                from_ist.strftime("%Y-%m-%d %H:%M:%S"),
+                to_ist.strftime("%Y-%m-%d %H:%M:%S"),
+                interval,
+                continuous=False,
+                oi=False,
+            )
+        except Exception as exc:
+            if _is_token_error(exc):
+                logger.info(
+                    "Skipped %s option candle fetch for %s: invalid or expired Zerodha access token.",
+                    interval,
+                    contract.tradingsymbol,
+                )
+            else:
+                logger.exception(
+                    "Failed to fetch %s option candles for %s from %s to %s.",
+                    interval,
+                    contract.tradingsymbol,
+                    from_ist,
+                    to_ist,
+                )
+            return []
+
     def _get_kite(self):
         if self._kite is None:
             if not self.zerodha_available:
@@ -320,10 +552,14 @@ class OptionPriceProvider:
             self._kite.set_access_token(self.settings.zerodha_access_token)
         return self._kite
 
-    def _load_option_instruments(self) -> list[dict[str, Any]]:
-        if self._instrument_rows is None:
+    def _load_option_instruments(self, exchange: str | None = None) -> list[dict[str, Any]]:
+        target_exchange = exchange or self.settings.zerodha_option_exchange
+        if self._instrument_rows is None or target_exchange != self.settings.zerodha_option_exchange:
             kite = self._get_kite()
-            self._instrument_rows = kite.instruments(self.settings.zerodha_option_exchange)
+            rows = kite.instruments(target_exchange)
+            if target_exchange != self.settings.zerodha_option_exchange:
+                return rows
+            self._instrument_rows = rows
         return self._instrument_rows
 
     def _rest_price(self, contract: OptionContract) -> float | None:
@@ -333,8 +569,14 @@ class OptionPriceProvider:
             quote = payload.get(quote_key)
             if quote and quote.get("last_price") is not None:
                 return round(float(quote["last_price"]), 2)
-        except Exception:
-            logger.exception("Zerodha REST LTP fetch failed for %s.", contract.tradingsymbol)
+        except Exception as exc:
+            if _is_token_error(exc):
+                logger.info(
+                    "Skipped Zerodha REST LTP fetch for %s: invalid or expired access token.",
+                    contract.tradingsymbol,
+                )
+            else:
+                logger.exception("Zerodha REST LTP fetch failed for %s.", contract.tradingsymbol)
         return None
 
     def _stream_price(self, contract: OptionContract, wait_seconds: float) -> float | None:
@@ -347,7 +589,8 @@ class OptionPriceProvider:
             token_already_subscribed = contract.instrument_token in self._subscribed_tokens
 
         if not token_already_subscribed:
-            self._subscribe(contract.instrument_token)
+            if not self._subscribe(contract.instrument_token):
+                return None
 
         deadline = time.time() + max(wait_seconds, 0.0)
         while time.time() <= deadline:
@@ -400,18 +643,37 @@ class OptionPriceProvider:
             self._ticker = ticker
             self._ws_started = True
 
-        self._ws_connected.wait(timeout=self.settings.zerodha_quote_timeout_seconds)
+        if not self._ws_connected.wait(timeout=self.settings.zerodha_quote_timeout_seconds):
+            logger.info("Zerodha ticker connection not ready yet; using REST fallback for this quote.")
 
-    def _subscribe(self, instrument_token: int) -> None:
+    def _subscribe(self, instrument_token: int) -> bool:
         with self._lock:
             self._subscribed_tokens.add(instrument_token)
             ticker = self._ticker
 
         if ticker is None:
-            return
+            return False
+
+        if not self._ws_connected.wait(timeout=self.settings.zerodha_quote_timeout_seconds):
+            logger.info(
+                "Skipped Zerodha ticker subscription for token %s because WebSocket is not connected yet. Using REST fallback.",
+                instrument_token,
+            )
+            return False
 
         try:
             ticker.subscribe([instrument_token])
             ticker.set_mode(ticker.MODE_LTP, [instrument_token])
+            return True
+        except AttributeError as exc:
+            if "sendMessage" in str(exc):
+                logger.info(
+                    "Skipped Zerodha ticker subscription for token %s because WebSocket transport is not ready. Using REST fallback.",
+                    instrument_token,
+                )
+            else:
+                logger.warning("Failed to subscribe Zerodha ticker for token %s: %s", instrument_token, exc)
+            return False
         except Exception:
             logger.exception("Failed to subscribe Zerodha ticker for token %s.", instrument_token)
+            return False

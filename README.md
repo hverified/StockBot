@@ -10,7 +10,7 @@ Python bot that:
 - exposes a dashboard API for a React frontend
 - stores bot state and alert history in MongoDB
 - stores paper trades in a dedicated MongoDB collection
-- keeps intraday run logs locally and archives them to MongoDB after session close
+- keeps run logs in local log files
 - includes a paper-trading execution engine for Supertrend signals
 
 ## Files
@@ -59,23 +59,47 @@ Optional:
 
 - `MONGODB_DATABASE` defaults to `nifty_alert_bot`
 - `MONGODB_COLLECTION` defaults to `bot_state`
-- `MONGODB_LOGS_COLLECTION` defaults to `run_logs_archive`
 - `MONGODB_PAPER_TRADES_COLLECTION` defaults to `paper_trades`
+- `MONGODB_SIGNAL_ALERTS_COLLECTION` defaults to `signal_alerts`
+- `STRATEGY_MODE` should be `option_contracts`; the live paper-trading app now runs only the 1-minute manual option-contract strategy
+- `OPTION_CONTRACT_1` first option contract input, accepts compact values like `24000PE` or full Zerodha symbols
+- `OPTION_CONTRACT_2` second option contract input, accepts compact values like `24100CE` or full Zerodha symbols
+- `OPTION_CONTRACT_INTERVAL` defaults to `1m` for manual option-contract strategy
+- `OPTION_CONTRACT_SIGNAL_MODE` defaults to `both`; use `st_10_1` only if you explicitly want fast-Supertrend-only entries
+- `OPTION_CONTRACT_ENTRY_SIGNAL` defaults to `BUY`
+- `OPTION_CONTRACT_TARGET_PCT` defaults to `3`
+- `OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT` defaults to `10`; skips option-contract entries when the signal candle open-close body exceeds this percent
 - `NIFTY_SYMBOL` defaults to `^NSEI`
 - `NIFTY_INTERVAL` defaults to `5m`
 - `NIFTY_PERIOD` defaults to `5d`
+- `NIFTY_LOT_SIZE` defaults to `75`
+- `NIFTY_STRIKE_STEP` defaults to `50`
+- `NIFTY_INDEX_EXCHANGE` defaults to `NSE`
+- `NIFTY_INDEX_TRADINGSYMBOL` defaults to `NIFTY 50`
+- `NIFTY_INDEX_TOKEN` defaults to `256265`
+- `NIFTY_OPTION_EXCHANGE` defaults to `NFO`
+- `NIFTY_ZERODHA_UNDERLYING` defaults to `NIFTY`
+- `SENSEX_SYMBOL` defaults to `^BSESN`
+- `SENSEX_LOT_SIZE` defaults to `20`
+- `SENSEX_STRIKE_STEP` defaults to `100`
+- `SENSEX_INDEX_EXCHANGE` defaults to `BSE`
+- `SENSEX_INDEX_TRADINGSYMBOL` defaults to `SENSEX`
+- `SENSEX_INDEX_TOKEN` defaults to `265`
+- `SENSEX_OPTION_EXCHANGE` defaults to `BFO`
+- `SENSEX_ZERODHA_UNDERLYING` defaults to `SENSEX`
 - `TIMEZONE` defaults to `Asia/Kolkata`
 - `SCHEDULE_START_IST` defaults to `09:55`
 - `SCHEDULE_END_IST` defaults to `13:30`
-- `SCHEDULE_INTERVAL_MINUTES` defaults to `5`
-- `SCHEDULE_BUFFER_SECONDS` defaults to `10`
+- `SCHEDULE_INTERVAL_MINUTES` defaults to `5` for index mode and `1` for option-contract mode
+- `SCHEDULE_BUFFER_SECONDS` defaults to `10` for index mode and `3` for option-contract mode
+- `FORCE_WEEKEND_RUNS` defaults to `false`; set to `true` only when manually testing on Saturday/Sunday
 - `PAPER_TRADE_CAPITAL` defaults to `100000`
 - `PAPER_TRADE_LOT_SIZE` defaults to `75`
 - `PAPER_TRADE_SLIPPAGE_PCT` defaults to `0.75`
 - `PAPER_TRADE_TARGET_PCT` defaults to `8`
 - `PAPER_TRADE_MAX_SL_PCT` defaults to `8`
 - `PAPER_TRADE_MONITOR_SECONDS` defaults to `5`
-- `PAPER_TRADE_ENTRY_SECOND` defaults to `55`
+- `PAPER_TRADE_ENTRY_SECOND` defaults to `55` for index mode and `3` for option-contract mode
 - `ZERODHA_API_KEY` optional, enables broker option quotes when set
 - `ZERODHA_API_SECRET` required for generating a fresh access token
 - `ZERODHA_ACCESS_TOKEN` optional, enables broker option quotes when set
@@ -84,9 +108,37 @@ Optional:
 - `ZERODHA_UNDERLYING` defaults to `NIFTY`
 - `ZERODHA_ENABLE_WEBSOCKET` defaults to `true`
 - `ZERODHA_QUOTE_TIMEOUT_SECONDS` defaults to `2.0`
-- `STATE_FILE` defaults to `bot_state.json`
+- `LEGACY_STATE_FILE` defaults to `bot_state.json` and is only used once to import old local state into MongoDB
 - `RUN_LOGS_DIR` defaults to `logs/run_logs`
 - `LOG_FILE` defaults to `logs/nifty_alert_bot.log`
+
+The `Option Backtest` tab takes a manual
+Zerodha option contract symbol, fetches that option's own historical candles,
+calculates Supertrend on the option chart, and simulates long option entries on
+the selected BUY/SELL signal.
+
+For live paper trading on two manual option contracts, set:
+
+```bash
+STRATEGY_MODE=option_contracts
+OPTION_CONTRACT_1=24000PE
+OPTION_CONTRACT_2=24100CE
+OPTION_CONTRACT_INTERVAL=1m
+OPTION_CONTRACT_SIGNAL_MODE=both
+OPTION_CONTRACT_TARGET_PCT=3
+OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT=10
+SCHEDULE_INTERVAL_MINUTES=1
+SCHEDULE_BUFFER_SECONDS=2
+PAPER_TRADE_ENTRY_SECOND=2
+```
+
+The bot resolves compact contract inputs to the nearest current Zerodha weekly
+expiry for `ZERODHA_UNDERLYING`/`ZERODHA_OPTION_EXCHANGE`. In `both` mode, the
+index strategy runs independently on 5-minute candles at `+10s`, and the option
+contract strategy scans both option charts independently on 1-minute candles at
+`+2s`. The option-contract stop loss is the low of the BUY signal option candle,
+the default target is 3%, and exit happens either when live option LTP hits the
+stop/target or when Supertrend (10,1) flips on a closed option candle.
 
 ## Run
 
@@ -95,6 +147,15 @@ Start everything together:
 ```bash
 ./run_all.sh
 ```
+
+By default, live and one-shot bot scans are disabled on Saturday and Sunday.
+For a one-off weekend test, run:
+
+```bash
+./venv/bin/python main.py --mode once --force-weekend-runs
+```
+
+For repeated weekend testing, set `FORCE_WEEKEND_RUNS=true` in `.env`.
 
 This launches:
 
@@ -105,6 +166,28 @@ This launches:
 Stop all services with `Ctrl+C`.
 
 For LAN or ngrok access, `run_all.sh` now binds the API and dashboard to `0.0.0.0`, and the dashboard proxies `/api/*` requests to the local FastAPI server so remote browsers do not try to call their own `127.0.0.1`.
+
+## Android PWA
+
+The React dashboard is installable as a PWA on Android. The Python bot, FastAPI API, Zerodha connection, and MongoDB still run on your laptop/server.
+
+1. Start the bot and dashboard:
+
+```bash
+./run_all.sh
+```
+
+2. Open the dashboard on Android Chrome using your laptop IP or ngrok URL.
+
+Example LAN URL:
+
+```text
+http://192.168.1.10:5173
+```
+
+3. In Chrome, tap the menu and choose `Add to Home screen` or `Install app`.
+
+The PWA includes a manifest and service worker, so Android can launch it like an app. Keep the backend reachable from the phone whenever you want live data.
 
 Run only the live bot:
 
@@ -190,7 +273,7 @@ To confirm Zerodha is working:
 - latest alert sent
 - recent live alert history
 
-The bot writes per-run structured logs locally during the session and archives them to MongoDB after the session close. The dashboard reads today's logs from local files and older archived dates from MongoDB.
+The bot writes per-run structured logs locally. The dashboard reads run logs from `logs/run_logs/*.jsonl` first and falls back to `logs/nifty_alert_bot.log` for older text logs.
 
 ## How it works
 
@@ -208,11 +291,11 @@ The bot writes per-run structured logs locally during the session and archives t
   - exits on stop-loss, target, or session close
   - prefers Zerodha option LTP for entry and exit monitoring when `ZERODHA_API_KEY` and `ZERODHA_ACCESS_TOKEN` are set
   - falls back to the synthetic option pricing model if Zerodha credentials, instruments, or live quotes are unavailable
-- The bot checks the most recent closed candle and stores the last sent signal locally so it does not send duplicates.
+- The bot checks the most recent closed candle and stores runtime state in MongoDB so it does not send duplicates.
 - The live runner sleeps until the next scheduled IST slot instead of polling every minute.
 - Logs are written to both the terminal and `logs/nifty_alert_bot.log`.
-- Structured run logs are buffered in `logs/run_logs/*.jsonl` during the day and archived to MongoDB after session close.
-- Paper trades and paper-trade events are stored in MongoDB in the `paper_trades` collection by default.
+- Structured run logs stay file-backed in `logs/run_logs/*.jsonl`.
+- Bot state, signal alerts, Zerodha session metadata, active paper-trade state, and completed paper trades are stored in MongoDB.
 
 ## Notes
 

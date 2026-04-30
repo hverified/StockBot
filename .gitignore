@@ -20,6 +20,7 @@ venv/
 # Logs
 logs/
 *.log
+exports/
 
 # Local state
 bot_state.json
@@ -27,6 +28,8 @@ bot_state.json
 # Dashboard / Node
 dashboard/node_modules/
 dashboard/dist/
+option_1m_project/dashboard/node_modules/
+option_1m_project/dashboard/dist/
 
 # OS / editor junk
 .DS_Store

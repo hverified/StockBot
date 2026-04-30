@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
-from nifty_alert_bot.alerts import build_alert_payload, format_alert
+from nifty_alert_bot.alerts import format_alert
 from nifty_alert_bot.config import get_settings
 from nifty_alert_bot.data import fetch_candles
 from nifty_alert_bot.indicators import build_signal_frame
@@ -16,14 +17,98 @@ from nifty_alert_bot.logging_utils import configure_logging
 from nifty_alert_bot.notifier import TelegramNotifier
 from nifty_alert_bot.paper_trading import PaperTradingEngine
 from nifty_alert_bot.run_log_store import RunLogStore
-from nifty_alert_bot.scheduler import next_run_at, parse_hhmm
+from nifty_alert_bot.scheduler import WEEKDAYS, next_run_at
 from nifty_alert_bot.state import StateStore
 
 
 logger = logging.getLogger(__name__)
 
 
+INDEX_STRATEGY_KEY = "index_5m"
+OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m"
+
+
+def build_state_store(settings) -> StateStore:
+    return StateStore(
+        settings.mongodb_uri,
+        settings.mongodb_database,
+        settings.mongodb_collection,
+        settings.mongodb_signal_alerts_collection,
+        settings.legacy_state_file,
+    )
+
+
+def strategy_key_for_settings(settings, state_key: str | None = None) -> str | None:
+    if state_key:
+        return state_key
+    if settings.strategy_mode == "option_contracts":
+        return OPTION_CONTRACT_STRATEGY_KEY
+    if settings.strategy_mode == "index":
+        return INDEX_STRATEGY_KEY
+    return None
+
+
+def apply_daily_option_contracts(
+    settings,
+    state: StateStore,
+    now: datetime,
+    state_key: str | None = None,
+):
+    strategy_key = strategy_key_for_settings(settings, state_key)
+    daily_contracts = state.load_daily_option_contracts(
+        now.date().isoformat(),
+        strategy_key,
+    )
+    if not daily_contracts and settings.strategy_mode in {"option_contracts", "both"}:
+        daily_contracts = state.load_daily_option_contracts(now.date().isoformat())
+    if not daily_contracts:
+        return settings
+
+    target_pct = float(daily_contracts.get("target_pct") or settings.option_contract_target_pct)
+
+    if settings.strategy_mode not in {"option_contracts", "both"}:
+        return replace(
+            settings,
+            schedule_start=str(daily_contracts.get("schedule_start") or settings.schedule_start),
+            schedule_end=str(daily_contracts.get("schedule_end") or settings.schedule_end),
+            paper_trade_capital=float(daily_contracts.get("starting_balance") or settings.paper_trade_capital),
+            paper_trade_target_pct=target_pct,
+        )
+
+    contract_1 = str(daily_contracts.get("contract_1") or settings.option_contract_1 or "").strip().upper()
+    contract_2 = str(daily_contracts.get("contract_2") or settings.option_contract_2 or "").strip().upper()
+
+    return replace(
+        settings,
+        option_contract_1=contract_1,
+        option_contract_2=contract_2,
+        schedule_start=str(daily_contracts.get("schedule_start") or settings.schedule_start),
+        schedule_end=str(daily_contracts.get("schedule_end") or settings.schedule_end),
+        option_contract_target_pct=target_pct,
+        option_contract_max_signal_candle_pct=float(
+            daily_contracts.get("max_signal_candle_pct") or settings.option_contract_max_signal_candle_pct
+        ),
+        option_contract_entry_signal="BUY",
+        option_contract_stop_loss_mode=str(
+            daily_contracts.get("stop_loss_mode") or settings.option_contract_stop_loss_mode
+        ).lower(),
+        option_contract_stop_loss_pct=float(
+            daily_contracts.get("stop_loss_pct") or settings.option_contract_stop_loss_pct
+        ),
+        paper_trade_capital=float(daily_contracts.get("starting_balance") or settings.paper_trade_capital),
+    )
+
+
 def to_python_scalar(value: Any) -> Any:
+    if isinstance(value, list):
+        return [
+            to_python_scalar(item)
+            if not isinstance(item, dict)
+            else {key: to_python_scalar(inner) for key, inner in item.items()}
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {key: to_python_scalar(inner) for key, inner in value.items()}
     if value is None or pd.isna(value):
         return None
     if hasattr(value, "item"):
@@ -31,8 +116,19 @@ def to_python_scalar(value: Any) -> Any:
     return value
 
 
-def build_alert_key(row: pd.Series) -> str:
-    return f"{row.name.isoformat()}::{row['signal']}"
+def _first_contract_log_detail(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not details:
+        return None
+    contract_signals = details.get("contract_signals")
+    if not isinstance(contract_signals, list):
+        return None
+
+    for item in contract_signals:
+        if not isinstance(item, dict):
+            continue
+        if item.get("close") is not None:
+            return item
+    return None
 
 
 def build_telegram_delivery_payload(result: dict, now: datetime) -> dict:
@@ -73,29 +169,29 @@ def build_run_log_payload(
     }
 
     if row is None:
+        contract_detail = _first_contract_log_detail(details)
         payload.update(
             {
-                "signal": None,
-                "close": None,
-                "st_10_1": None,
-                "st_10_3": None,
-                "st_10_1_trend": None,
-                "st_10_3_trend": None,
-                "candle_time": None,
+                "signal": contract_detail.get("signal") if contract_detail else None,
+                "close": contract_detail.get("close") if contract_detail else None,
+                "st_10_1": contract_detail.get("st_10_1") if contract_detail else None,
+                "st_10_3": contract_detail.get("st_10_3") if contract_detail else None,
+                "st_10_1_trend": contract_detail.get("st_10_1_trend") if contract_detail else None,
+                "st_10_3_trend": contract_detail.get("st_10_3_trend") if contract_detail else None,
+                "candle_time": contract_detail.get("candle_time") if contract_detail else None,
+                "option_symbol": contract_detail.get("resolved_symbol") if contract_detail else None,
             }
         )
         if details:
             payload.update(
                 {
                     key: to_python_scalar(value)
-                    if not isinstance(value, dict)
-                    else value
                     for key, value in details.items()
                 }
             )
         return payload
 
-    candle_time = row.name.tz_convert(now.tzinfo).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+    candle_time = row.name.tz_convert(now.tzinfo).strftime("%Y-%m-%d %H:%M:%S %Z")
     payload.update(
         {
             "signal": to_python_scalar(row.get("signal")),
@@ -111,8 +207,6 @@ def build_run_log_payload(
         payload.update(
             {
                 key: to_python_scalar(value)
-                if not isinstance(value, dict)
-                else value
                 for key, value in details.items()
             }
         )
@@ -154,9 +248,29 @@ def process_once(
     notifier: TelegramNotifier,
     state: StateStore,
     run_logs: RunLogStore,
+    *,
+    state_key: str | None = None,
 ) -> None:
     now_ist = datetime.now(settings.timezone)
-    engine = PaperTradingEngine(settings, state)
+    settings = apply_daily_option_contracts(settings, state, now_ist, state_key)
+    if not settings.force_weekend_runs and now_ist.weekday() not in WEEKDAYS:
+        message = "Bot disabled on Saturday/Sunday. Set FORCE_WEEKEND_RUNS=true to force a manual test run."
+        record_run_event(
+            state,
+            run_logs,
+            now_ist,
+            settings.symbol,
+            settings.interval,
+            "skipped",
+            message,
+            None,
+            details={"skip_reason": "weekend_disabled"},
+        )
+        logger.info(message)
+        return
+
+    closed_candle = None
+    engine = PaperTradingEngine(settings, state, state_key=state_key)
     try:
         resumed_trade = engine.resume_active_trade_if_any(notifier, now_ist)
         if resumed_trade is not None:
@@ -170,12 +284,36 @@ def process_once(
                 resumed_trade.message,
                 resumed_trade.row,
                 alert_sent=resumed_trade.alert_sent,
-                details=resumed_trade.details,
+                details={
+                    **(resumed_trade.details or {}),
+                    "strategy_key": state_key,
+                    "strategy_mode": settings.strategy_mode,
+                },
             )
             logger.info(resumed_trade.message)
             return
 
-        closed_candle = None
+        if settings.strategy_mode == "option_contracts":
+            cycle_result = engine.evaluate_option_contracts(notifier, now_ist)
+            record_run_event(
+                state,
+                run_logs,
+                now_ist,
+                ", ".join(settings.option_contracts) or settings.symbol,
+                settings.option_contract_interval,
+                cycle_result.status,
+                cycle_result.message,
+                cycle_result.row,
+                alert_sent=cycle_result.alert_sent,
+                details={
+                    **(cycle_result.details or {}),
+                    "strategy_key": state_key,
+                    "strategy_mode": settings.strategy_mode,
+                },
+            )
+            logger.info(cycle_result.message)
+            return
+
         frame = fetch_candles(settings.symbol, settings.interval, settings.period)
         signal_frame = build_signal_frame(frame)
 
@@ -206,7 +344,11 @@ def process_once(
             cycle_result.message,
             cycle_result.row if cycle_result.row is not None else closed_candle,
             alert_sent=cycle_result.alert_sent,
-            details=cycle_result.details,
+            details={
+                **(cycle_result.details or {}),
+                "strategy_key": state_key,
+                "strategy_mode": settings.strategy_mode,
+            },
         )
         logger.info(cycle_result.message)
     except Exception as exc:
@@ -229,13 +371,8 @@ def send_sample_alert(signal: str = "BUY") -> None:
     settings = get_settings()
     configure_logging(settings.log_file)
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-    state = StateStore(settings.state_file)
-    run_logs = RunLogStore(
-        settings.run_logs_dir,
-        settings.mongodb_uri,
-        settings.mongodb_database,
-        settings.mongodb_logs_collection,
-    )
+    state = build_state_store(settings)
+    run_logs = RunLogStore(settings.run_logs_dir)
     now_ist = datetime.now(settings.timezone)
     sample_row = pd.Series(
         {
@@ -261,56 +398,130 @@ def send_sample_alert(signal: str = "BUY") -> None:
         sample=True,
     )
     logger.info("Sample %s alert sent.", signal.upper())
+    state.close()
 
 
-def archive_due_run_logs(settings, run_logs: RunLogStore, now_ist: datetime) -> None:
-    end_time = parse_hhmm(settings.schedule_end)
-    end_of_session = now_ist.replace(
-        hour=end_time.hour,
-        minute=end_time.minute,
-        second=settings.schedule_buffer_seconds,
-        microsecond=0,
-    )
-    today = now_ist.date().isoformat()
-
-    for date_value in run_logs.local_dates():
-        if date_value < today or (date_value == today and now_ist >= end_of_session):
-            archived_count = run_logs.archive_date(date_value)
-            if archived_count:
-                logger.info("Archived %s run logs for %s to MongoDB.", archived_count, date_value)
-
-
-def run_once() -> None:
+def run_once(*, force_weekend_runs: bool = False) -> None:
     settings = get_settings()
+    if force_weekend_runs:
+        settings = replace(settings, force_weekend_runs=True)
+    settings = option_contract_runtime_settings(settings)
     configure_logging(settings.log_file)
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-    state = StateStore(settings.state_file)
-    run_logs = RunLogStore(
-        settings.run_logs_dir,
-        settings.mongodb_uri,
-        settings.mongodb_database,
-        settings.mongodb_logs_collection,
-    )
-    archive_due_run_logs(settings, run_logs, datetime.now(settings.timezone))
-    process_once(settings, notifier, state, run_logs)
+    state = build_state_store(settings)
+    run_logs = RunLogStore(settings.run_logs_dir)
+    try:
+        process_once(settings, notifier, state, run_logs)
+    finally:
+        state.close()
 
 
-def run_live() -> None:
-    settings = get_settings()
-    configure_logging(settings.log_file)
-    notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-    state = StateStore(settings.state_file)
-    run_logs = RunLogStore(
-        settings.run_logs_dir,
-        settings.mongodb_uri,
-        settings.mongodb_database,
-        settings.mongodb_logs_collection,
+def build_dual_strategy_settings(settings) -> list[tuple[Any, str]]:
+    index_settings = replace(
+        settings,
+        strategy_mode="index",
+        schedule_interval_minutes=5,
+        schedule_buffer_seconds=10,
+        paper_trade_entry_second=55,
     )
-    archive_due_run_logs(settings, run_logs, datetime.now(settings.timezone))
+    option_settings = replace(
+        settings,
+        strategy_mode="option_contracts",
+        schedule_interval_minutes=settings.option_contract_interval_minutes,
+        schedule_buffer_seconds=2,
+        paper_trade_entry_second=2,
+    )
+    return [
+        (index_settings, INDEX_STRATEGY_KEY),
+        (option_settings, OPTION_CONTRACT_STRATEGY_KEY),
+    ]
+
+
+def option_contract_runtime_settings(settings):
+    if settings.strategy_mode == "option_contracts":
+        return settings
+    logger.warning(
+        "STRATEGY_MODE=%s is no longer used for live paper trading. Running only the 1m option-contract bot.",
+        settings.strategy_mode,
+    )
+    return replace(
+        settings,
+        strategy_mode="option_contracts",
+        schedule_interval_minutes=settings.option_contract_interval_minutes,
+        schedule_buffer_seconds=2,
+        paper_trade_entry_second=2,
+    )
+
+
+def run_dual_live(settings, notifier, state: StateStore, run_logs: RunLogStore) -> None:
+    strategies = build_dual_strategy_settings(settings)
     logger.info(
-        "Starting NIFTY alert bot for %s on %s candles. Schedule: %s to %s IST every %s minutes at +%s seconds.",
-        settings.symbol,
-        settings.interval,
+        "Starting dual alert bot: index 5m at +10s and option-contract %s at +2s.",
+        settings.option_contract_interval,
+    )
+
+    while True:
+        now_ist = datetime.now(settings.timezone)
+        strategies = [
+            (
+                apply_daily_option_contracts(strategy_settings, state, now_ist, state_key),
+                state_key,
+            )
+            for strategy_settings, state_key in build_dual_strategy_settings(settings)
+        ]
+        scheduled_runs = [
+            (
+                next_run_at(
+                    now_ist,
+                    strategy_settings.schedule_start,
+                    strategy_settings.schedule_end,
+                    strategy_settings.schedule_interval_minutes,
+                    strategy_settings.schedule_buffer_seconds,
+                    include_weekends=strategy_settings.force_weekend_runs,
+                ),
+                strategy_settings,
+                state_key,
+            )
+            for strategy_settings, state_key in strategies
+        ]
+        next_run, _, _ = min(scheduled_runs, key=lambda item: item[0])
+        sleep_seconds = max((next_run - now_ist).total_seconds(), 0.0)
+        logger.info(
+            "Next dual scheduled run at %s. Sleeping for %.2f seconds.",
+            next_run.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
+            sleep_seconds,
+        )
+        time.sleep(sleep_seconds)
+
+        due_at = datetime.now(settings.timezone)
+        for strategy_run_at, strategy_settings, state_key in scheduled_runs:
+            if strategy_run_at <= due_at:
+                try:
+                    process_once(
+                        strategy_settings,
+                        notifier,
+                        state,
+                        run_logs,
+                        state_key=state_key,
+                    )
+                except Exception:
+                    logger.exception("Scheduled %s bot iteration failed", state_key)
+
+
+def run_live(*, force_weekend_runs: bool = False) -> None:
+    settings = get_settings()
+    if force_weekend_runs:
+        settings = replace(settings, force_weekend_runs=True)
+    settings = option_contract_runtime_settings(settings)
+    configure_logging(settings.log_file)
+    notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+    state = build_state_store(settings)
+    run_logs = RunLogStore(settings.run_logs_dir)
+    logger.info(
+        "Starting alert bot in %s mode for %s on %s candles. Schedule: %s to %s IST every %s minutes at +%s seconds.",
+        settings.strategy_mode,
+        ", ".join(settings.option_contracts) if settings.strategy_mode == "option_contracts" else settings.symbol,
+        settings.option_contract_interval if settings.strategy_mode == "option_contracts" else settings.interval,
         settings.schedule_start,
         settings.schedule_end,
         settings.schedule_interval_minutes,
@@ -319,12 +530,14 @@ def run_live() -> None:
 
     while True:
         now_ist = datetime.now(settings.timezone)
+        scheduled_settings = apply_daily_option_contracts(settings, state, now_ist)
         next_run = next_run_at(
             now_ist,
-            settings.schedule_start,
-            settings.schedule_end,
-            settings.schedule_interval_minutes,
-            settings.schedule_buffer_seconds,
+            scheduled_settings.schedule_start,
+            scheduled_settings.schedule_end,
+            scheduled_settings.schedule_interval_minutes,
+            scheduled_settings.schedule_buffer_seconds,
+            include_weekends=scheduled_settings.force_weekend_runs,
         )
         sleep_seconds = max((next_run - now_ist).total_seconds(), 0.0)
         logger.info(
@@ -332,11 +545,12 @@ def run_live() -> None:
             next_run.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
             sleep_seconds,
         )
+        if settings.force_weekend_runs:
+            logger.info("FORCE_WEEKEND_RUNS is enabled; Saturday/Sunday runs are allowed.")
         time.sleep(sleep_seconds)
 
         try:
-            process_once(settings, notifier, state, run_logs)
-            archive_due_run_logs(settings, run_logs, datetime.now(settings.timezone))
+            process_once(scheduled_settings, notifier, state, run_logs)
         except Exception:
             logger.exception("Scheduled bot iteration failed")
 
@@ -355,6 +569,11 @@ def main() -> None:
         default="BUY",
         help="Signal to use with --mode sample-alert.",
     )
+    parser.add_argument(
+        "--force-weekend-runs",
+        action="store_true",
+        help="Allow bot scans on Saturday/Sunday for manual testing.",
+    )
     args = parser.parse_args()
 
     if args.mode == "sample-alert":
@@ -362,7 +581,7 @@ def main() -> None:
         return
 
     if args.mode == "once":
-        run_once()
+        run_once(force_weekend_runs=args.force_weekend_runs)
         return
 
-    run_live()
+    run_live(force_weekend_runs=args.force_weekend_runs)

@@ -44,6 +44,36 @@ def fetch_candles(symbol: str, interval: str, period: str) -> pd.DataFrame:
     return frame
 
 
+def fetch_candles_between(symbol: str, interval: str, start: str, end: str) -> pd.DataFrame:
+    try:
+        frame = yf.download(
+            tickers=symbol,
+            interval=interval,
+            start=start,
+            end=end,
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch candle data for {symbol}: {exc}") from exc
+
+    if frame.empty:
+        raise ValueError(f"No candle data returned for {symbol} between {start} and {end}.")
+
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = frame.columns.get_level_values(0)
+
+    missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    frame = frame[REQUIRED_COLUMNS].copy()
+    frame = frame.dropna()
+    frame.index = pd.to_datetime(frame.index)
+    return frame
+
+
 def fetch_latest_price(symbol: str) -> float:
     frame = fetch_candles(symbol, interval="1m", period="1d")
     if frame.empty:

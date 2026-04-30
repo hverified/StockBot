@@ -36,6 +36,8 @@ def next_run_at(
     end_hhmm: str,
     interval_minutes: int,
     buffer_seconds: int,
+    *,
+    include_weekends: bool = False,
 ) -> datetime:
     start_time = parse_hhmm(start_hhmm)
     end_time = parse_hhmm(end_hhmm)
@@ -43,7 +45,7 @@ def next_run_at(
 
     for day_offset in range(8):
         candidate_day = current_day + timedelta(days=day_offset)
-        if candidate_day.weekday() not in WEEKDAYS:
+        if not include_weekends and candidate_day.weekday() not in WEEKDAYS:
             continue
 
         for slot in session_slots(

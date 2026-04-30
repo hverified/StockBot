@@ -22,7 +22,7 @@ def atr(frame: pd.DataFrame, period: int) -> pd.Series:
 
 def supertrend(frame: pd.DataFrame, period: int, multiplier: float) -> pd.DataFrame:
     price = frame.copy()
-    price["atr"] = atr(price, period)
+    price.loc[:, "atr"] = atr(price, period)
     hl2 = (price["High"] + price["Low"]) / 2.0
 
     upper_band = hl2 + (multiplier * price["atr"])
@@ -69,7 +69,7 @@ def supertrend(frame: pd.DataFrame, period: int, multiplier: float) -> pd.DataFr
     return result
 
 
-def build_signal_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def build_signal_frame(frame: pd.DataFrame, signal_mode: str = "both") -> pd.DataFrame:
     result = frame.copy()
 
     st_fast = supertrend(result, period=10, multiplier=1)
@@ -80,13 +80,28 @@ def build_signal_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result["st_10_3"] = st_slow["supertrend"]
     result["st_10_3_trend"] = st_slow["trend"]
 
-    result["signal"] = None
-    buy_mask = (result["st_10_1_trend"] == 1) & (result["st_10_3_trend"] == 1)
-    sell_mask = (result["st_10_1_trend"] == -1) & (result["st_10_3_trend"] == -1)
+    fast_buy_mask = result["st_10_1_trend"] == 1
+    fast_sell_mask = result["st_10_1_trend"] == -1
+    both_buy_mask = fast_buy_mask & (result["st_10_3_trend"] == 1)
+    both_sell_mask = fast_sell_mask & (result["st_10_3_trend"] == -1)
 
-    cross_to_buy = buy_mask & ~buy_mask.shift(1, fill_value=False)
-    cross_to_sell = sell_mask & ~sell_mask.shift(1, fill_value=False)
+    fast_cross_to_buy = fast_buy_mask & ~fast_buy_mask.shift(1, fill_value=False)
+    fast_cross_to_sell = fast_sell_mask & ~fast_sell_mask.shift(1, fill_value=False)
+    both_cross_to_buy = both_buy_mask & ~both_buy_mask.shift(1, fill_value=False)
+    both_cross_to_sell = both_sell_mask & ~both_sell_mask.shift(1, fill_value=False)
 
-    result.loc[cross_to_buy, "signal"] = "BUY"
-    result.loc[cross_to_sell, "signal"] = "SELL"
+    result.loc[:, "signal_st_10_1"] = None
+    result.loc[fast_cross_to_buy, "signal_st_10_1"] = "BUY"
+    result.loc[fast_cross_to_sell, "signal_st_10_1"] = "SELL"
+
+    result.loc[:, "signal_both"] = None
+    result.loc[both_cross_to_buy, "signal_both"] = "BUY"
+    result.loc[both_cross_to_sell, "signal_both"] = "SELL"
+
+    normalized_mode = str(signal_mode or "both").lower()
+    result.loc[:, "signal"] = (
+        result["signal_st_10_1"]
+        if normalized_mode == "st_10_1"
+        else result["signal_both"]
+    )
     return result
