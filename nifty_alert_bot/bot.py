@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 INDEX_STRATEGY_KEY = "index_5m"
 OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m"
+SENSEX_OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m_sensex"
 
 
 def build_state_store(settings) -> StateStore:
@@ -48,6 +50,31 @@ def strategy_key_for_settings(settings, state_key: str | None = None) -> str | N
     return None
 
 
+def option_strategy_settings_for_key(settings, strategy_key: str):
+    base = replace(
+        settings,
+        strategy_mode="option_contracts",
+        schedule_interval_minutes=settings.option_contract_interval_minutes,
+        schedule_buffer_seconds=2,
+        paper_trade_entry_second=2,
+    )
+    if strategy_key == SENSEX_OPTION_CONTRACT_STRATEGY_KEY:
+        return replace(
+            base,
+            zerodha_option_exchange="BFO",
+            zerodha_underlying="SENSEX",
+            paper_trade_lot_size=20,
+            option_contract_1="",
+            option_contract_2="",
+        )
+    return replace(
+        base,
+        zerodha_option_exchange="NFO",
+        zerodha_underlying="NIFTY",
+        paper_trade_lot_size=75,
+    )
+
+
 def apply_daily_option_contracts(
     settings,
     state: StateStore,
@@ -59,7 +86,11 @@ def apply_daily_option_contracts(
         now.date().isoformat(),
         strategy_key,
     )
-    if not daily_contracts and settings.strategy_mode in {"option_contracts", "both"}:
+    if (
+        not daily_contracts
+        and settings.strategy_mode in {"option_contracts", "both"}
+        and strategy_key in {None, OPTION_CONTRACT_STRATEGY_KEY}
+    ):
         daily_contracts = state.load_daily_option_contracts(now.date().isoformat())
     if not daily_contracts:
         return settings
@@ -88,7 +119,12 @@ def apply_daily_option_contracts(
         option_contract_max_signal_candle_pct=float(
             daily_contracts.get("max_signal_candle_pct") or settings.option_contract_max_signal_candle_pct
         ),
-        option_contract_entry_signal="BUY",
+        option_contract_strike_offset=int(
+            daily_contracts.get("strike_offset") if daily_contracts.get("strike_offset") is not None else settings.option_contract_strike_offset
+        ),
+        option_contract_entry_signal=str(
+            daily_contracts.get("entry_signal") or settings.option_contract_entry_signal
+        ).upper(),
         option_contract_stop_loss_mode=str(
             daily_contracts.get("stop_loss_mode") or settings.option_contract_stop_loss_mode
         ).lower(),
@@ -126,7 +162,7 @@ def _first_contract_log_detail(details: dict[str, Any] | None) -> dict[str, Any]
     for item in contract_signals:
         if not isinstance(item, dict):
             continue
-        if item.get("close") is not None:
+        if item.get("resolved_symbol") or item.get("close") is not None:
             return item
     return None
 
@@ -437,6 +473,19 @@ def build_dual_strategy_settings(settings) -> list[tuple[Any, str]]:
     ]
 
 
+def build_option_contract_strategy_settings(settings) -> list[tuple[Any, str]]:
+    return [
+        (
+            option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY),
+            OPTION_CONTRACT_STRATEGY_KEY,
+        ),
+        (
+            option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY),
+            SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+        ),
+    ]
+
+
 def option_contract_runtime_settings(settings):
     if settings.strategy_mode == "option_contracts":
         return settings
@@ -444,13 +493,7 @@ def option_contract_runtime_settings(settings):
         "STRATEGY_MODE=%s is no longer used for live paper trading. Running only the 1m option-contract bot.",
         settings.strategy_mode,
     )
-    return replace(
-        settings,
-        strategy_mode="option_contracts",
-        schedule_interval_minutes=settings.option_contract_interval_minutes,
-        schedule_buffer_seconds=2,
-        paper_trade_entry_second=2,
-    )
+    return option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY)
 
 
 def run_dual_live(settings, notifier, state: StateStore, run_logs: RunLogStore) -> None:
@@ -512,33 +555,44 @@ def run_live(*, force_weekend_runs: bool = False) -> None:
     settings = get_settings()
     if force_weekend_runs:
         settings = replace(settings, force_weekend_runs=True)
-    settings = option_contract_runtime_settings(settings)
     configure_logging(settings.log_file)
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
     state = build_state_store(settings)
     run_logs = RunLogStore(settings.run_logs_dir)
     logger.info(
-        "Starting alert bot in %s mode for %s on %s candles. Schedule: %s to %s IST every %s minutes at +%s seconds.",
-        settings.strategy_mode,
-        ", ".join(settings.option_contracts) if settings.strategy_mode == "option_contracts" else settings.symbol,
-        settings.option_contract_interval if settings.strategy_mode == "option_contracts" else settings.interval,
+        "Starting 1m option-contract paper bots for NIFTY and SENSEX. Schedule: %s to %s IST every %s minutes at +%s seconds.",
         settings.schedule_start,
         settings.schedule_end,
-        settings.schedule_interval_minutes,
-        settings.schedule_buffer_seconds,
+        settings.option_contract_interval_minutes,
+        2,
     )
+    running_threads: dict[str, threading.Thread] = {}
 
     while True:
         now_ist = datetime.now(settings.timezone)
-        scheduled_settings = apply_daily_option_contracts(settings, state, now_ist)
-        next_run = next_run_at(
-            now_ist,
-            scheduled_settings.schedule_start,
-            scheduled_settings.schedule_end,
-            scheduled_settings.schedule_interval_minutes,
-            scheduled_settings.schedule_buffer_seconds,
-            include_weekends=scheduled_settings.force_weekend_runs,
-        )
+        strategies = [
+            (
+                apply_daily_option_contracts(strategy_settings, state, now_ist, state_key),
+                state_key,
+            )
+            for strategy_settings, state_key in build_option_contract_strategy_settings(settings)
+        ]
+        scheduled_runs = [
+            (
+                next_run_at(
+                    now_ist,
+                    strategy_settings.schedule_start,
+                    strategy_settings.schedule_end,
+                    strategy_settings.schedule_interval_minutes,
+                    strategy_settings.schedule_buffer_seconds,
+                    include_weekends=strategy_settings.force_weekend_runs,
+                ),
+                strategy_settings,
+                state_key,
+            )
+            for strategy_settings, state_key in strategies
+        ]
+        next_run, _, _ = min(scheduled_runs, key=lambda item: item[0])
         sleep_seconds = max((next_run - now_ist).total_seconds(), 0.0)
         logger.info(
             "Next scheduled run at %s. Sleeping for %.2f seconds.",
@@ -549,10 +603,30 @@ def run_live(*, force_weekend_runs: bool = False) -> None:
             logger.info("FORCE_WEEKEND_RUNS is enabled; Saturday/Sunday runs are allowed.")
         time.sleep(sleep_seconds)
 
-        try:
-            process_once(scheduled_settings, notifier, state, run_logs)
-        except Exception:
-            logger.exception("Scheduled bot iteration failed")
+        due_at = datetime.now(settings.timezone)
+        for strategy_run_at, strategy_settings, state_key in scheduled_runs:
+            if strategy_run_at <= due_at:
+                running_thread = running_threads.get(state_key)
+                if running_thread is not None and running_thread.is_alive():
+                    logger.info("Skipped %s scheduled scan because its previous worker is still active.", state_key)
+                    continue
+
+                def run_strategy_once(
+                    strategy_settings=strategy_settings,
+                    state_key=state_key,
+                ) -> None:
+                    try:
+                        process_once(strategy_settings, notifier, state, run_logs, state_key=state_key)
+                    except Exception:
+                        logger.exception("Scheduled %s bot iteration failed", state_key)
+
+                thread = threading.Thread(
+                    target=run_strategy_once,
+                    name=f"{state_key}-worker",
+                    daemon=True,
+                )
+                running_threads[state_key] = thread
+                thread.start()
 
 
 def main() -> None:

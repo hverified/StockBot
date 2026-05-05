@@ -56,6 +56,7 @@ class StateStore:
             "paper_trading_by_strategy": {},
             "live_trading": {
                 "enabled": False,
+                "enabled_strategy_keys": [],
                 "updated_at": None,
                 "updated_by": None,
                 "last_action": None,
@@ -99,11 +100,18 @@ class StateStore:
         return payload if isinstance(payload, dict) else None
 
     def record_run(self, run_at: datetime, status: str, message: str) -> None:
-        state = self.load_state()
-        state["last_run_at"] = run_at.isoformat()
-        state["last_run_status"] = status
-        state["last_run_message"] = message
-        self.save_state(state)
+        self.collection.update_one(
+            {"_id": "bot_state"},
+            {
+                "$set": {
+                    "last_run_at": run_at.isoformat(),
+                    "last_run_status": status,
+                    "last_run_message": message,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
+            upsert=True,
+        )
 
     def record_alert(
         self,
@@ -112,11 +120,17 @@ class StateStore:
         *,
         update_last_alert_key: bool = True,
     ) -> None:
-        state = self.load_state()
-        state["last_alert"] = alert_payload
+        state_update = {
+            "last_alert": alert_payload,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
         if update_last_alert_key:
-            state["last_alert_key"] = alert_key
-        self.save_state(state)
+            state_update["last_alert_key"] = alert_key
+        self.collection.update_one(
+            {"_id": "bot_state"},
+            {"$set": state_update},
+            upsert=True,
+        )
 
         if self.alert_collection is None:
             return
@@ -175,9 +189,16 @@ class StateStore:
         )
 
     def record_telegram_delivery(self, delivery_payload: dict[str, Any]) -> None:
-        state = self.load_state()
-        state["last_telegram_delivery"] = delivery_payload
-        self.save_state(state)
+        self.collection.update_one(
+            {"_id": "bot_state"},
+            {
+                "$set": {
+                    "last_telegram_delivery": delivery_payload,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
+            upsert=True,
+        )
 
     def record_zerodha_session(self, session_payload: dict[str, Any]) -> None:
         state = self.load_state()
@@ -278,16 +299,28 @@ class StateStore:
         return default_paper_state.copy()
 
     def save_paper_trading(self, paper_state: dict[str, Any], strategy_key: str | None = None) -> None:
-        state = self.load_state()
         if strategy_key:
-            strategies = state.get("paper_trading_by_strategy")
-            if not isinstance(strategies, dict):
-                strategies = {}
-            strategies[strategy_key] = paper_state
-            state["paper_trading_by_strategy"] = strategies
+            self.collection.update_one(
+                {"_id": "bot_state"},
+                {
+                    "$set": {
+                        f"paper_trading_by_strategy.{strategy_key}": paper_state,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                },
+                upsert=True,
+            )
         else:
-            state["paper_trading"] = paper_state
-        self.save_state(state)
+            self.collection.update_one(
+                {"_id": "bot_state"},
+                {
+                    "$set": {
+                        "paper_trading": paper_state,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                },
+                upsert=True,
+            )
 
     def load_paper_trading_strategies(self) -> dict[str, Any]:
         strategies = self.load_state().get("paper_trading_by_strategy")

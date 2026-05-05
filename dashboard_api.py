@@ -16,12 +16,20 @@ from pydantic import BaseModel
 
 from nifty_alert_bot.backtesting import (
     BacktestRequest as EngineBacktestRequest,
+    NiftyFiveMinuteBacktestRequest,
     OptionContractBacktestRequest,
     run_backtest,
+    run_nifty_five_minute_backtest,
     run_option_contract_backtest,
 )
 from nifty_alert_bot.config import get_settings
-from nifty_alert_bot.bot import build_state_store, send_sample_alert
+from nifty_alert_bot.bot import (
+    OPTION_CONTRACT_STRATEGY_KEY,
+    SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+    build_state_store,
+    option_strategy_settings_for_key,
+    send_sample_alert,
+)
 from nifty_alert_bot.live_trading import LiveTradingBroker, LiveTradingError
 from nifty_alert_bot.option_price_provider import OptionPriceProvider
 from nifty_alert_bot.paper_trade_repository import PaperTradeRepository
@@ -44,6 +52,11 @@ _LIVE_TRADING_SNAPSHOT_CACHE: dict[str, Any] = {
     "payload": None,
 }
 _LIVE_TRADING_SNAPSHOT_TTL_SECONDS = 10
+_OPTION_EXPIRY_CACHE: dict[str, Any] = {
+    "expires_at": None,
+    "items": {},
+}
+_OPTION_EXPIRY_CACHE_TTL_SECONDS = 60 * 60 * 6
 
 
 class SampleAlertRequest(BaseModel):
@@ -56,7 +69,7 @@ class ZerodhaExchangeRequest(BaseModel):
 
 
 class StrategyContractsRequest(BaseModel):
-    strategyKey: Literal["option_contracts_1m"] = "option_contracts_1m"
+    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex"] = "option_contracts_1m"
     contract1: str
     contract2: str
     scheduleStart: str | None = None
@@ -64,6 +77,7 @@ class StrategyContractsRequest(BaseModel):
     startingBalance: float | None = None
     targetPct: float | None = None
     maxSignalCandlePct: float | None = None
+    strikeOffset: int | None = None
     entrySignal: Literal["BUY", "SELL", "BOTH"] | None = None
     stopLossMode: Literal["signal_low", "percent"] | None = None
     stopLossPct: float | None = None
@@ -71,10 +85,14 @@ class StrategyContractsRequest(BaseModel):
 
 class AddPaperBalanceRequest(BaseModel):
     amount: float
+    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex"] = "option_contracts_1m"
 
 
 class LiveTradingToggleRequest(BaseModel):
     enabled: bool
+    enabledStrategyKeys: list[
+        Literal["option_contracts_1m", "option_contracts_1m_sensex"]
+    ] | None = None
 
 
 class LiveOrderCancelRequest(BaseModel):
@@ -114,11 +132,30 @@ class OptionContractBacktestApiRequest(BaseModel):
     balance: float
     lotSize: int = 75
     targetPct: float
+    maxSignalCandlePct: float = 10
     stopLossPct: float
+    strikeOffset: int = 0
     stopLossMode: Literal["signal_low", "percent"] = "signal_low"
     capStopLoss: bool = True
     requireVwap: bool = False
     entryTiming: Literal["signal_close", "next_minute"] = "next_minute"
+    entryTime: str
+    exitTime: str
+
+
+class NiftyFiveMinuteBacktestApiRequest(BaseModel):
+    mode: Literal["fixed", "dynamic"] = "fixed"
+    contract1: str = ""
+    contract2: str = ""
+    contractSide: Literal["PE", "CE", "BOTH"] = "PE"
+    startDate: str
+    endDate: str
+    balance: float
+    targetPct: float
+    maxBodyPct: float
+    minBodyPct: float = 0
+    stopLossPct: float = 0
+    strikeOffset: int = 0
     entryTime: str
     exitTime: str
 
@@ -377,7 +414,18 @@ def _write_option_backtest_report_csv(result: dict[str, Any], timezone) -> Path:
     return path
 
 
-def _build_paper_dashboard_payload(settings, paper_state: dict) -> dict:
+def _trade_matches_strategy_key(trade: dict, strategy_key: str | None) -> bool:
+    if not strategy_key:
+        return True
+    trade_strategy_key = trade.get("strategy_key") or trade.get("strategyKey")
+    if trade_strategy_key:
+        return trade_strategy_key == strategy_key
+    if strategy_key == OPTION_CONTRACT_STRATEGY_KEY:
+        return str(trade.get("strategy_mode") or trade.get("strategyMode") or "").lower() == "option_contracts"
+    return False
+
+
+def _build_paper_dashboard_payload(settings, paper_state: dict, strategy_key: str | None = None) -> dict:
     now = datetime.now(settings.timezone)
     active_trade = paper_state.get("active_trade")
     raw_active_trades = paper_state.get("active_trades")
@@ -425,7 +473,7 @@ def _build_paper_dashboard_payload(settings, paper_state: dict) -> dict:
     finally:
         price_provider.close()
 
-    trade_history = _load_paper_trade_history(settings)
+    trade_history = _load_paper_trade_history(settings, strategy_key=strategy_key)
     summary_by_range = _build_paper_summary_by_range(
         settings,
         paper_state,
@@ -629,14 +677,15 @@ def _build_paper_summary_by_range(
     return summaries
 
 
-def _load_paper_trade_history(settings) -> list[dict]:
+def _load_paper_trade_history(settings, strategy_key: str | None = None) -> list[dict]:
     repository = PaperTradeRepository(
         settings.mongodb_uri,
         settings.mongodb_database,
         settings.mongodb_paper_trades_collection,
     )
     try:
-        return repository.list_trades()
+        trades = repository.list_trades()
+        return [trade for trade in trades if _trade_matches_strategy_key(trade, strategy_key)]
     finally:
         repository.close()
 
@@ -859,13 +908,17 @@ def _strategy_setup_payload(
         "scheduleStart": schedule_start,
         "scheduleEnd": schedule_end,
         "targetPct": daily_setup.get("target_pct") or target_pct,
-        "entrySignal": "BUY",
+        "entrySignal": daily_setup.get("entry_signal") or settings.option_contract_entry_signal,
         "maxSignalCandlePct": daily_setup.get("max_signal_candle_pct")
         or settings.option_contract_max_signal_candle_pct,
+        "strikeOffset": daily_setup.get("strike_offset")
+        if daily_setup.get("strike_offset") is not None
+        else settings.option_contract_strike_offset,
         "stopLossMode": daily_setup.get("stop_loss_mode") or settings.option_contract_stop_loss_mode,
         "stopLossPct": daily_setup.get("stop_loss_pct") or settings.option_contract_stop_loss_pct,
         "startingBalance": daily_setup.get("starting_balance") or settings.paper_trade_capital,
         "dailyContracts": daily_setup or None,
+        "nextExpiry": _load_next_option_expiry(settings),
         "effectiveContracts": {
             "contract1": daily_setup.get("contract_1") or "",
             "contract2": daily_setup.get("contract_2") or "",
@@ -884,24 +937,87 @@ def _strategy_setup_payload(
     return payload
 
 
+def _parse_option_expiry(value: Any):
+    if value is None:
+        return None
+    if hasattr(value, "date"):
+        return value.date() if hasattr(value, "hour") else value
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except ValueError:
+        return None
+
+
+def _load_next_option_expiry(settings) -> dict | None:
+    cache_key = f"{settings.zerodha_option_exchange}:{settings.zerodha_underlying}".upper()
+    now = datetime.now(settings.timezone)
+    cached_items = _OPTION_EXPIRY_CACHE.get("items") or {}
+    if (
+        _OPTION_EXPIRY_CACHE.get("expires_at")
+        and _OPTION_EXPIRY_CACHE["expires_at"] > now
+        and cache_key in cached_items
+    ):
+        return cached_items[cache_key]
+
+    try:
+        rows = OptionPriceProvider(settings)._load_option_instruments(
+            settings.zerodha_option_exchange,
+        )
+    except Exception:
+        return None
+
+    today = now.date()
+    expiries = []
+    for row in rows:
+        if str(row.get("name", "")).upper() != settings.zerodha_underlying.upper():
+            continue
+        if str(row.get("instrument_type", "")).upper() not in {"CE", "PE"}:
+            continue
+        expiry = _parse_option_expiry(row.get("expiry"))
+        if expiry is not None and expiry >= today:
+            expiries.append(expiry)
+
+    if not expiries:
+        payload = None
+    else:
+        next_expiry = min(expiries)
+        payload = {
+            "date": next_expiry.isoformat(),
+            "label": next_expiry.strftime("%d %b %Y"),
+        }
+
+    cached_items[cache_key] = payload
+    _OPTION_EXPIRY_CACHE["items"] = cached_items
+    _OPTION_EXPIRY_CACHE["expires_at"] = now + timedelta(seconds=_OPTION_EXPIRY_CACHE_TTL_SECONDS)
+    return payload
+
+
 def _load_dashboard_payload() -> dict:
     settings = get_settings()
+    nifty_settings = option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY)
+    sensex_settings = option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
     state_store = build_state_store(settings)
     try:
         state = state_store.load_state()
-        paper_state = state_store.load_paper_trading(_option_strategy_state_key(settings))
+        paper_state = state_store.load_paper_trading(OPTION_CONTRACT_STRATEGY_KEY)
+        sensex_paper_state = state_store.load_paper_trading(SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
         trade_date = datetime.now(settings.timezone).date().isoformat()
-        daily_contracts = state_store.load_daily_option_contracts(
+        nifty_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
-            "option_contracts_1m",
+            OPTION_CONTRACT_STRATEGY_KEY,
         ) or state_store.load_daily_option_contracts(trade_date)
+        sensex_daily_contracts = state_store.load_daily_option_contracts(
+            trade_date,
+            SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+        )
         recent_alerts = _filtered_recent_alerts(state_store.list_recent_alerts())
     finally:
         state_store.close()
     now = datetime.now(settings.timezone)
     trade_date = now.date().isoformat()
-    option_schedule_start = (daily_contracts or {}).get("schedule_start") or settings.schedule_start
-    option_schedule_end = (daily_contracts or {}).get("schedule_end") or settings.schedule_end
+    daily_contracts = nifty_daily_contracts
+    option_schedule_start = (nifty_daily_contracts or {}).get("schedule_start") or settings.schedule_start
+    option_schedule_end = (nifty_daily_contracts or {}).get("schedule_end") or settings.schedule_end
     next_run = next_run_at(
         now,
         option_schedule_start,
@@ -944,15 +1060,26 @@ def _load_dashboard_payload() -> dict:
             },
             "usesDailyContracts": bool(daily_contracts),
             "strategySetups": {
-                "option_contracts_1m": _strategy_setup_payload(
-                    strategy_key="option_contracts_1m",
-                    label="1m option bot",
+                OPTION_CONTRACT_STRATEGY_KEY: _strategy_setup_payload(
+                    strategy_key=OPTION_CONTRACT_STRATEGY_KEY,
+                    label="NIFTY 1m option bot",
                     trade_date=trade_date,
-                    daily_setup=daily_contracts,
-                    settings=settings,
+                    daily_setup=nifty_daily_contracts,
+                    settings=nifty_settings,
                     schedule_start=option_schedule_start,
                     schedule_end=option_schedule_end,
-                    target_pct=settings.option_contract_target_pct,
+                    target_pct=nifty_settings.option_contract_target_pct,
+                    include_env_contracts=True,
+                ),
+                SENSEX_OPTION_CONTRACT_STRATEGY_KEY: _strategy_setup_payload(
+                    strategy_key=SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+                    label="SENSEX 1m option bot",
+                    trade_date=trade_date,
+                    daily_setup=sensex_daily_contracts,
+                    settings=sensex_settings,
+                    schedule_start=(sensex_daily_contracts or {}).get("schedule_start") or sensex_settings.schedule_start,
+                    schedule_end=(sensex_daily_contracts or {}).get("schedule_end") or sensex_settings.schedule_end,
+                    target_pct=sensex_settings.option_contract_target_pct,
                     include_env_contracts=True,
                 ),
             },
@@ -980,7 +1107,19 @@ def _load_dashboard_payload() -> dict:
         "marketQuotes": _load_market_quotes(settings),
         "latestAlert": recent_alerts[0] if recent_alerts else None,
         "recentAlerts": recent_alerts,
-        "paperTrading": _build_paper_dashboard_payload(settings, paper_state),
+        "paperTrading": _build_paper_dashboard_payload(nifty_settings, paper_state, OPTION_CONTRACT_STRATEGY_KEY),
+        "paperTradingByStrategy": {
+            OPTION_CONTRACT_STRATEGY_KEY: _build_paper_dashboard_payload(
+                nifty_settings,
+                paper_state,
+                OPTION_CONTRACT_STRATEGY_KEY,
+            ),
+            SENSEX_OPTION_CONTRACT_STRATEGY_KEY: _build_paper_dashboard_payload(
+                sensex_settings,
+                sensex_paper_state,
+                SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+            ),
+        },
     }
 
 
@@ -1020,6 +1159,15 @@ def dashboard_data() -> dict:
     return _load_dashboard_payload()
 
 
+@app.get("/api/market-quotes")
+def market_quotes_data() -> dict:
+    settings = get_settings()
+    return {
+        "generatedAt": datetime.now(settings.timezone).isoformat(),
+        "marketQuotes": _load_market_quotes(settings),
+    }
+
+
 @app.post("/api/strategy/contracts")
 def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
     settings = get_settings()
@@ -1027,9 +1175,14 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
     contract_1 = payload.contract1.strip().upper().replace(" ", "")
     contract_2 = payload.contract2.strip().upper().replace(" ", "")
 
-    if payload.strategyKey == "option_contracts_1m" and (not contract_1 or not contract_2):
-        raise HTTPException(status_code=400, detail="Both Contract 1 and Contract 2 are required.")
+    if payload.strategyKey in {OPTION_CONTRACT_STRATEGY_KEY, SENSEX_OPTION_CONTRACT_STRATEGY_KEY} and not contract_1:
+        raise HTTPException(status_code=400, detail="Contract 1 is required.")
+    if payload.strategyKey in {OPTION_CONTRACT_STRATEGY_KEY, SENSEX_OPTION_CONTRACT_STRATEGY_KEY}:
+        invalid_sides = [side for side in (contract_1, contract_2) if side and side not in {"CE", "PE"}]
+        if invalid_sides:
+            raise HTTPException(status_code=400, detail="Use only CE or PE in contract setup.")
 
+    strategy_settings = option_strategy_settings_for_key(settings, payload.strategyKey)
     state_store = build_state_store(settings)
     try:
         saved = state_store.save_daily_option_contracts(
@@ -1040,17 +1193,20 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
             {
                 "schedule_start": payload.scheduleStart or settings.schedule_start,
                 "schedule_end": payload.scheduleEnd or settings.schedule_end,
-                "starting_balance": payload.startingBalance or settings.paper_trade_capital,
-                "target_pct": payload.targetPct or settings.option_contract_target_pct,
-                "max_signal_candle_pct": payload.maxSignalCandlePct or settings.option_contract_max_signal_candle_pct,
-                "entry_signal": "BUY",
-                "stop_loss_mode": payload.stopLossMode or settings.option_contract_stop_loss_mode,
-                "stop_loss_pct": payload.stopLossPct or settings.option_contract_stop_loss_pct,
+                "starting_balance": payload.startingBalance or strategy_settings.paper_trade_capital,
+                "target_pct": payload.targetPct or strategy_settings.option_contract_target_pct,
+                "max_signal_candle_pct": payload.maxSignalCandlePct or strategy_settings.option_contract_max_signal_candle_pct,
+                "strike_offset": payload.strikeOffset if payload.strikeOffset is not None else strategy_settings.option_contract_strike_offset,
+                "entry_signal": payload.entrySignal or strategy_settings.option_contract_entry_signal,
+                "stop_loss_mode": payload.stopLossMode or strategy_settings.option_contract_stop_loss_mode,
+                "stop_loss_pct": payload.stopLossPct or strategy_settings.option_contract_stop_loss_pct,
+                "exchange": strategy_settings.zerodha_option_exchange,
+                "underlying": strategy_settings.zerodha_underlying,
+                "lot_size": strategy_settings.paper_trade_lot_size,
             },
             strategy_key=payload.strategyKey,
         )
-        strategy_key = _option_strategy_state_key(settings)
-        paper_state = state_store.load_paper_trading(strategy_key)
+        paper_state = state_store.load_paper_trading(payload.strategyKey)
         if (
             paper_state.get("trade_date") != now.date().isoformat()
             or (
@@ -1058,23 +1214,27 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
                 and int(paper_state.get("daily_trade_count", 0) or 0) == 0
             )
         ):
-            starting_balance = round(float(payload.startingBalance or settings.paper_trade_capital), 2)
+            current_cash_balance = paper_state.get("cash_balance")
+            try:
+                starting_balance = round(float(current_cash_balance), 2)
+            except (TypeError, ValueError):
+                starting_balance = round(float(payload.startingBalance or strategy_settings.paper_trade_capital), 2)
             paper_state["trade_date"] = now.date().isoformat()
             paper_state["starting_balance"] = starting_balance
             paper_state["cash_balance"] = starting_balance
             paper_state.setdefault("balance_adjustments", [])
-            state_store.save_paper_trading(paper_state, strategy_key)
+            state_store.save_paper_trading(paper_state, payload.strategyKey)
     finally:
         state_store.close()
 
     return {
-        "message": "1m setup saved for today's trading session.",
+        "message": f"{strategy_settings.zerodha_underlying} 1m setup saved for today's trading session.",
         "contracts": saved,
     }
 
 
 def _option_strategy_state_key(settings) -> str | None:
-    return "option_contracts_1m" if settings.strategy_mode == "both" else None
+    return OPTION_CONTRACT_STRATEGY_KEY
 
 
 @app.post("/api/paper-balance/add")
@@ -1085,19 +1245,25 @@ def add_paper_balance(payload: AddPaperBalanceRequest) -> dict:
     settings = get_settings()
     state_store = build_state_store(settings)
     now = datetime.now(settings.timezone)
-    strategy_key = _option_strategy_state_key(settings)
+    strategy_key = payload.strategyKey
+    strategy_settings = option_strategy_settings_for_key(settings, strategy_key)
     try:
         paper_state = state_store.load_paper_trading(strategy_key)
         if paper_state.get("trade_date") != now.date().isoformat():
+            current_cash_balance = paper_state.get("cash_balance")
+            try:
+                day_start_balance = round(float(current_cash_balance), 2)
+            except (TypeError, ValueError):
+                day_start_balance = round(float(strategy_settings.paper_trade_capital), 2)
             paper_state["trade_date"] = now.date().isoformat()
-            paper_state["cash_balance"] = round(float(settings.paper_trade_capital), 2)
-            paper_state["starting_balance"] = round(float(settings.paper_trade_capital), 2)
-            paper_state["balance_adjustments"] = []
+            paper_state["cash_balance"] = day_start_balance
+            paper_state["starting_balance"] = day_start_balance
+            paper_state.setdefault("balance_adjustments", [])
 
-        current_balance = float(paper_state.get("cash_balance") or settings.paper_trade_capital)
+        current_balance = float(paper_state.get("cash_balance") or strategy_settings.paper_trade_capital)
         paper_state["cash_balance"] = round(current_balance + payload.amount, 2)
         paper_state["starting_balance"] = round(
-            float(paper_state.get("starting_balance") or settings.paper_trade_capital) + payload.amount,
+            float(paper_state.get("starting_balance") or strategy_settings.paper_trade_capital) + payload.amount,
             2,
         )
         adjustments = paper_state.get("balance_adjustments")
@@ -1272,7 +1438,12 @@ def live_trading_toggle(payload: LiveTradingToggleRequest) -> dict:
     broker, state_store = _live_broker()
     try:
         _clear_live_trading_cache()
-        return {"status": broker.set_enabled(payload.enabled)}
+        return {
+            "status": broker.set_enabled(
+                payload.enabled,
+                enabled_strategy_keys=payload.enabledStrategyKeys,
+            )
+        }
     except LiveTradingError as exc:
         _raise_live_error(exc)
     finally:
@@ -1403,11 +1574,40 @@ def run_option_contract_backtest_api(payload: OptionContractBacktestApiRequest) 
                 balance=payload.balance,
                 lot_size=payload.lotSize,
                 target_pct=payload.targetPct,
+                max_signal_candle_pct=payload.maxSignalCandlePct,
                 stop_loss_pct=payload.stopLossPct,
+                strike_offset=payload.strikeOffset,
                 stop_loss_mode=payload.stopLossMode,
                 cap_stop_loss=payload.capStopLoss,
                 require_vwap=payload.requireVwap,
                 entry_timing=payload.entryTiming,
+                entry_time=payload.entryTime,
+                exit_time=payload.exitTime,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/backtest/nifty-5m")
+def run_nifty_five_minute_backtest_api(payload: NiftyFiveMinuteBacktestApiRequest) -> dict:
+    settings = get_settings()
+    try:
+        return run_nifty_five_minute_backtest(
+            settings,
+            NiftyFiveMinuteBacktestRequest(
+                mode=payload.mode,
+                contract_1=payload.contract1,
+                contract_2=payload.contract2,
+                contract_side=payload.contractSide,
+                start_date=payload.startDate,
+                end_date=payload.endDate,
+                balance=payload.balance,
+                target_pct=payload.targetPct,
+                max_body_pct=payload.maxBodyPct,
+                min_body_pct=payload.minBodyPct,
+                stop_loss_pct=payload.stopLossPct,
+                strike_offset=payload.strikeOffset,
                 entry_time=payload.entryTime,
                 exit_time=payload.exitTime,
             ),

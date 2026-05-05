@@ -1,4 +1,4 @@
-const CACHE_NAME = "hverified-dashboard-v1";
+const CACHE_NAME = "tradewise-dashboard-v1";
 const APP_SHELL = [
   "/",
   "/index.html",

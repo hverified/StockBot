@@ -302,7 +302,15 @@ class PaperTradingEngine:
     ) -> dict[str, Any] | None:
         broker = LiveTradingBroker(self.settings, self.state_store)
         try:
-            if not broker.status().get("enabled"):
+            broker_status = broker.status()
+            if not broker_status.get("enabled"):
+                return None
+            enabled_strategy_keys = broker_status.get("enabledStrategyKeys")
+            if (
+                isinstance(enabled_strategy_keys, list)
+                and enabled_strategy_keys
+                and self.state_key not in enabled_strategy_keys
+            ):
                 return None
             requested_quantity = int(trade["quantity"])
             live_available_cash = None
@@ -561,6 +569,11 @@ class PaperTradingEngine:
         today = now.date().isoformat()
         changed = False
         if paper_state.get("trade_date") != today:
+            carried_cash_balance = paper_state.get("cash_balance")
+            try:
+                day_start_balance = round(float(carried_cash_balance), 2)
+            except (TypeError, ValueError):
+                day_start_balance = round(float(self.settings.paper_trade_capital), 2)
             paper_state.update(
                 {
                     "trade_date": today,
@@ -576,11 +589,11 @@ class PaperTradingEngine:
                     "day_stopped": False,
                     "day_stop_reason": None,
                     "trade_history": [],
-                    "starting_balance": round(float(self.settings.paper_trade_capital), 2),
-                    "cash_balance": round(float(self.settings.paper_trade_capital), 2),
-                    "balance_adjustments": [],
+                    "starting_balance": day_start_balance,
+                    "cash_balance": day_start_balance,
                 }
             )
+            paper_state.setdefault("balance_adjustments", [])
             changed = True
         elif paper_state.get("cash_balance") is None:
             paper_state["starting_balance"] = round(float(self.settings.paper_trade_capital), 2)
@@ -1105,8 +1118,8 @@ class PaperTradingEngine:
 
         contract_details: list[dict[str, Any]] = []
         candidates: list[tuple[str, Any, pd.Series, str]] = []
-        entry_signal_mode = "BUY"
-        allowed_entry_signals = {"BUY"}
+        entry_signal_mode = str(self.settings.option_contract_entry_signal or "BUY").upper()
+        allowed_entry_signals = {"BUY", "SELL"} if entry_signal_mode == "BOTH" else {entry_signal_mode}
         interval_minutes = self.settings.option_contract_interval_minutes
 
         for contract_input in contract_inputs:
@@ -1114,6 +1127,7 @@ class PaperTradingEngine:
                 contract_input,
                 now,
                 self.settings.zerodha_option_exchange,
+                self.settings.zerodha_underlying,
             )
             if contract is None:
                 contract_details.append(self._contract_run_detail(contract_input, None, None))
@@ -1151,10 +1165,7 @@ class PaperTradingEngine:
             candidates.append((signal_key, contract, row, signal))
 
         if not candidates:
-            if (
-                paper_state.get("option_contract_scan_initialized") is not True
-                or self._option_contract_session_initialized is not True
-            ):
+            if paper_state.get("option_contract_scan_initialized") is not True:
                 paper_state["option_contract_scan_initialized"] = True
                 paper_state["option_contract_session_initialized_at"] = now.isoformat()
                 self._save_paper_state(paper_state)
@@ -1169,10 +1180,12 @@ class PaperTradingEngine:
                 },
             )
 
-        if (
-            paper_state.get("option_contract_scan_initialized") is not True
-            or self._option_contract_session_initialized is not True
-        ):
+        baseline_already_seen = (
+            paper_state.get("option_contract_scan_initialized") is True
+            or bool(paper_state.get("option_contract_session_initialized_at"))
+            or bool(paper_state.get("last_signal_key"))
+        )
+        if not baseline_already_seen:
             signal_key, contract, closed_candle, entry_signal = candidates[0]
             paper_state["option_contract_scan_initialized"] = True
             paper_state["last_signal_key"] = signal_key
@@ -1340,6 +1353,8 @@ class PaperTradingEngine:
         trade = {
             "trade_id": f"{signal_key}::{entry_time.isoformat()}",
             "strategy_mode": "option_contracts",
+            "strategy_key": self.state_key,
+            "underlying": self.settings.zerodha_underlying,
             "signal": entry_signal,
             "strike": contract.strike,
             "option_type": contract.option_type,
@@ -1420,6 +1435,8 @@ class PaperTradingEngine:
             extra={
                 "optionSymbol": contract.tradingsymbol,
                 "strategyMode": "option_contracts",
+                "strategyKey": self.state_key,
+                "underlying": self.settings.zerodha_underlying,
                 "contractInput": contract.tradingsymbol,
                 "interval": self.settings.option_contract_interval,
             },

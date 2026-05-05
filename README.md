@@ -110,6 +110,7 @@ Optional:
 - `ZERODHA_QUOTE_TIMEOUT_SECONDS` defaults to `2.0`
 - `LEGACY_STATE_FILE` defaults to `bot_state.json` and is only used once to import old local state into MongoDB
 - `RUN_LOGS_DIR` defaults to `logs/run_logs`
+- `CANDLE_CACHE_DIR` defaults to `logs/candle_cache`; option backtests reuse cached Zerodha historical candles from here to avoid repeated API calls
 - `LOG_FILE` defaults to `logs/nifty_alert_bot.log`
 
 The `Option Backtest` tab takes a manual

@@ -20,6 +20,7 @@ class Settings:
     option_contract_entry_signal: str
     option_contract_target_pct: float
     option_contract_max_signal_candle_pct: float
+    option_contract_strike_offset: int
     option_contract_stop_loss_mode: str
     option_contract_stop_loss_pct: float
     symbol: str
@@ -27,6 +28,7 @@ class Settings:
     period: str
     legacy_state_file: str
     run_logs_dir: str
+    candle_cache_dir: str
     telegram_bot_token: str
     telegram_chat_id: str
     mongodb_uri: str
@@ -125,6 +127,7 @@ def get_settings() -> Settings:
         option_contract_max_signal_candle_pct=float(
             os.getenv("OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT", "10")
         ),
+        option_contract_strike_offset=int(os.getenv("OPTION_CONTRACT_STRIKE_OFFSET", "0")),
         option_contract_stop_loss_mode=os.getenv("OPTION_CONTRACT_STOP_LOSS_MODE", "signal_low").strip().lower()
         or "signal_low",
         option_contract_stop_loss_pct=float(os.getenv("OPTION_CONTRACT_STOP_LOSS_PCT", "8")),
@@ -138,6 +141,8 @@ def get_settings() -> Settings:
         ).strip()
         or "bot_state.json",
         run_logs_dir=os.getenv("RUN_LOGS_DIR", "logs/run_logs").strip() or "logs/run_logs",
+        candle_cache_dir=os.getenv("CANDLE_CACHE_DIR", "logs/candle_cache").strip()
+        or "logs/candle_cache",
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         mongodb_uri=mongodb_uri,

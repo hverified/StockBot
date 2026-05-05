@@ -81,24 +81,35 @@ class LiveTradingBroker:
 
     def status(self) -> dict[str, Any]:
         state = self.state_store.load_live_trading()
+        enabled_strategy_keys = state.get("enabled_strategy_keys")
+        if not isinstance(enabled_strategy_keys, list):
+            enabled_strategy_keys = []
         return {
             "enabled": bool(state.get("enabled")),
+            "enabledStrategyKeys": enabled_strategy_keys,
             "updatedAt": state.get("updated_at"),
             "updatedBy": state.get("updated_by"),
             "lastAction": state.get("last_action"),
             "zerodhaReady": bool(self.settings.zerodha_api_key and self.settings.zerodha_access_token),
         }
 
-    def set_enabled(self, enabled: bool, *, updated_by: str = "dashboard") -> dict[str, Any]:
+    def set_enabled(
+        self,
+        enabled: bool,
+        *,
+        updated_by: str = "dashboard",
+        enabled_strategy_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
         now = datetime.now(self.settings.timezone).isoformat()
-        return self.state_store.save_live_trading(
-            {
-                "enabled": bool(enabled),
-                "updated_at": now,
-                "updated_by": updated_by,
-                "last_action": "enabled" if enabled else "disabled",
-            }
-        )
+        payload: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "updated_at": now,
+            "updated_by": updated_by,
+            "last_action": "enabled" if enabled else "disabled",
+        }
+        if enabled_strategy_keys is not None:
+            payload["enabled_strategy_keys"] = list(dict.fromkeys(enabled_strategy_keys))
+        return self.state_store.save_live_trading(payload)
 
     def assert_enabled(self) -> None:
         if not self.status()["enabled"]:

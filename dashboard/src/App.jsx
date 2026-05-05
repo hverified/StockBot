@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 const TABLE_COLUMN_STORAGE_PREFIX = "dashboard-columns:";
+const DEFAULT_TABLE_PAGE_SIZE = 10;
+const TABLE_PAGE_SIZE_OPTIONS = [10, 25, 50];
 const OVERVIEW_RANGE_OPTIONS = [
   { id: "today", label: "Today", tradesLabel: "Trades Today" },
   { id: "week", label: "This Week", tradesLabel: "Trades This Week" },
@@ -40,21 +42,43 @@ const OPTION_BACKTEST_ENTRY_SIGNALS = [
 ];
 const STRATEGY_FILTER_OPTIONS = [
   { id: "all", label: "All" },
-  { id: "oneMinute", label: "1m Bot" },
+  { id: "niftyOneMinute", label: "NIFTY 1m" },
+  { id: "sensexOneMinute", label: "SENSEX 1m" },
 ];
 const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
-  { id: "oneMinuteBot", label: "1m Bot" },
+  { id: "niftyOneMinuteBot", label: "NIFTY 1m Bot" },
+  { id: "sensexOneMinuteBot", label: "SENSEX 1m Bot" },
   { id: "trades", label: "Trades" },
   { id: "signals", label: "Signals" },
   { id: "reports", label: "Reports" },
   { id: "liveTrading", label: "Live Trading" },
   { id: "broker", label: "Broker" },
   { id: "logs", label: "Logs" },
+  { id: "niftyFiveMinuteBacktest", label: "NIFTY 5m Backtest" },
   { id: "optionBacktest", label: "Option Backtest" },
 ];
+// const THEME_OPTIONS = [
+//   { id: "warm", label: "Warm" },
+//   { id: "cool", label: "Cool" },
+//   { id: "dark", label: "Dark" },
+// ];
+const THEME_OPTIONS = [
+  { id: "warm", label: "Warm" },
+  { id: "cool", label: "Cool" },
+  { id: "nature", label: "Nature" },
+  { id: "finance", label: "Finance" },
+  { id: "sunset", label: "Sunset" },
+  { id: "neon", label: "Neon" },
+  { id: "dark-pro", label: "Dark Pro" },
+  { id: "midnight", label: "Midnight" },
+  { id: "ice", label: "Ice" },
+  { id: "luxe", label: "Luxe" },
+  { id: "amber", label: "Amber" },
+];
 const DAILY_SETUP_KEYS = {
-  oneMinuteBot: "option_contracts_1m",
+  niftyOneMinuteBot: "option_contracts_1m",
+  sensexOneMinuteBot: "option_contracts_1m_sensex",
 };
 const DEFAULT_DAILY_SETUP_FORM = {
   contract1: "",
@@ -65,6 +89,7 @@ const DEFAULT_DAILY_SETUP_FORM = {
   startingBalance: "100000",
   targetPct: "3",
   maxSignalCandlePct: "10",
+  strikeOffset: "0",
   stopLossMode: "signal_low",
   stopLossPct: "8",
 };
@@ -164,7 +189,9 @@ function getTradePnl(trade) {
 }
 
 function getTradeOptionType(trade) {
-  const optionType = String(trade.option_type ?? trade.optionType ?? "").toUpperCase();
+  const optionType = String(
+    trade.option_type ?? trade.optionType ?? "",
+  ).toUpperCase();
   return optionType === "CE" || optionType === "PE" ? optionType : "OTHER";
 }
 
@@ -225,10 +252,7 @@ function buildReportMetrics(trades, rangeId = "total") {
     0,
   );
   const grossLoss = Math.abs(
-    losses.reduce(
-      (sum, trade) => sum + Math.min(0, getTradePnl(trade)),
-      0,
-    ),
+    losses.reduce((sum, trade) => sum + Math.min(0, getTradePnl(trade)), 0),
   );
   const totalPnl = pnlValues.reduce((sum, value) => sum + value, 0);
   const averageWin = wins.length ? grossProfit / wins.length : 0;
@@ -248,6 +272,35 @@ function buildReportMetrics(trades, rangeId = "total") {
     bestTrade: pnlValues.length ? Math.max(...pnlValues) : 0,
     worstTrade: pnlValues.length ? Math.min(...pnlValues) : 0,
     expectancy: totalTrades ? totalPnl / totalTrades : 0,
+  };
+}
+
+function buildTradeSummaryForRange(trades, activeTrades, rangeId) {
+  const rangeTrades = filterTradesForRange(trades, rangeId);
+  const rangeStart = getOverviewRangeStart(rangeId);
+  const unrealizedPnl = activeTrades.reduce((sum, trade) => {
+    const entryDate = parseIstDate(trade.entry_time ?? trade.entryTime);
+    if (rangeStart && (!entryDate || entryDate < rangeStart)) return sum;
+    return sum + Number(trade.unrealizedPnl ?? 0);
+  }, 0);
+  const realizedPnl = rangeTrades.reduce(
+    (sum, trade) => sum + getTradePnl(trade),
+    0,
+  );
+  const winCount = rangeTrades.filter(
+    (trade) => String(trade.status ?? "").toUpperCase() === "WIN",
+  ).length;
+  const lossCount = rangeTrades.filter(
+    (trade) => String(trade.status ?? "").toUpperCase() === "LOSS",
+  ).length;
+
+  return {
+    runningPnl: roundCurrencyNumber(realizedPnl + unrealizedPnl),
+    realizedPnl: roundCurrencyNumber(realizedPnl),
+    unrealizedPnl: roundCurrencyNumber(unrealizedPnl),
+    tradeCount: rangeTrades.length,
+    winCount,
+    lossCount,
   };
 }
 
@@ -309,8 +362,10 @@ function buildOptionTypeReport(trades, rangeId = "total") {
     const status = String(trade.status ?? "").toUpperCase();
     bucket.trades += 1;
     bucket.pnl += pnl;
-    bucket.bestTrade = bucket.bestTrade === null ? pnl : Math.max(bucket.bestTrade, pnl);
-    bucket.worstTrade = bucket.worstTrade === null ? pnl : Math.min(bucket.worstTrade, pnl);
+    bucket.bestTrade =
+      bucket.bestTrade === null ? pnl : Math.max(bucket.bestTrade, pnl);
+    bucket.worstTrade =
+      bucket.worstTrade === null ? pnl : Math.min(bucket.worstTrade, pnl);
     if (status === "WIN") bucket.wins += 1;
     if (status === "LOSS") bucket.losses += 1;
     if (pnl > 0) bucket.grossProfit += pnl;
@@ -320,7 +375,9 @@ function buildOptionTypeReport(trades, rangeId = "total") {
   return buckets.map((bucket) => ({
     ...bucket,
     pnl: roundCurrencyNumber(bucket.pnl),
-    averagePnl: bucket.trades ? roundCurrencyNumber(bucket.pnl / bucket.trades) : 0,
+    averagePnl: bucket.trades
+      ? roundCurrencyNumber(bucket.pnl / bucket.trades)
+      : 0,
     winRate: bucket.trades ? (bucket.wins / bucket.trades) * 100 : 0,
     profitFactor: bucket.grossLoss
       ? bucket.grossProfit / bucket.grossLoss
@@ -503,6 +560,25 @@ function getTodayInIst() {
   }).format(new Date());
 }
 
+function formatIstClock(value) {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(value);
+}
+
+function formatIstClockDate(value) {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+  }).format(value);
+}
+
 function MetricCard({ label, value, tone = "neutral", valueClassName = "" }) {
   return (
     <article className={`metric-card metric-card--${tone}`}>
@@ -538,15 +614,26 @@ function MarketQuoteCard({ quote }) {
   return (
     <article className={`metric-card metric-card--${tone} quote-card`}>
       <div className="quote-card-layout">
-        <div>
-          <p className="metric-label">{quote.name}</p>
-          <p className="metric-value">{formatNumber(quote.ltp)}</p>
+        <div className="quote-card__header">
+          <div>
+            <p className="metric-label">{quote.name}</p>
+            <p className="quote-card__caption">Live index</p>
+          </div>
+          <span
+            className={`quote-status-dot quote-status-dot--${tone}`}
+            aria-hidden="true"
+          />
+        </div>
+        <div className="quote-card__price-row">
+          <p className="metric-value quote-card__price">
+            {formatNumber(quote.ltp)}
+          </p>
           <p className={`quote-change quote-change--${tone}`}>
             {quote.change === null ||
             quote.change === undefined ||
             quote.changePct === null ||
             quote.changePct === undefined
-              ? "Change not available"
+              ? "N/A"
               : `${sign}${formatNumber(quote.change)} (${sign}${formatNumber(quote.changePct)}%)`}
           </p>
         </div>
@@ -558,7 +645,10 @@ function MarketQuoteCard({ quote }) {
               role="img"
               aria-label={`${quote.name} intraday mini chart`}
             >
-              <path className="quote-sparkline__area" d={`${sparklinePath} L 100 40 L 0 40 Z`} />
+              <path
+                className="quote-sparkline__area"
+                d={`${sparklinePath} L 100 40 L 0 40 Z`}
+              />
               <path className="quote-sparkline__line" d={sparklinePath} />
             </svg>
           ) : (
@@ -708,7 +798,9 @@ function OptionTypeReport({ buckets }) {
             className={`option-type-report__card option-type-report__card--${tone}`}
           >
             <div className="option-type-report__header">
-              <span className={`option-type-badge option-type-badge--${bucket.optionType.toLowerCase()}`}>
+              <span
+                className={`option-type-badge option-type-badge--${bucket.optionType.toLowerCase()}`}
+              >
                 {bucket.optionType}
               </span>
               <PnlValue value={bucket.pnl} />
@@ -828,18 +920,112 @@ function ColumnPicker({
   );
 }
 
+function PaginationControls({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange,
+}) {
+  if (total <= pageSize && pageSize === DEFAULT_TABLE_PAGE_SIZE) return null;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+  const start = total ? (safePage - 1) * pageSize + 1 : 0;
+  const end = Math.min(total, safePage * pageSize);
+
+  return (
+    <div className="table-pagination">
+      <span className="table-pagination__count">
+        {start}-{end} of {total}
+      </span>
+      <label className="table-pagination__size">
+        <span>Rows</span>
+        <select
+          value={pageSize}
+          onChange={(event) => onPageSizeChange(Number(event.target.value))}
+        >
+          {TABLE_PAGE_SIZE_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="table-pagination__buttons">
+        <button
+          type="button"
+          onClick={() => onPageChange(safePage - 1)}
+          disabled={safePage <= 1}
+        >
+          Prev
+        </button>
+        <span>
+          {safePage}/{totalPages}
+        </span>
+        <button
+          type="button"
+          onClick={() => onPageChange(safePage + 1)}
+          disabled={safePage >= totalPages}
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function formatTrend(value) {
-  if (value === 1 || value === "1") return { icon: "▲", tone: "good" };
-  if (value === -1 || value === "-1") return { icon: "▼", tone: "bad" };
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (
+    value === 1 ||
+    value === "1" ||
+    normalized === "bullish" ||
+    normalized === "buy" ||
+    normalized === "up" ||
+    normalized === "green"
+  ) {
+    return { icon: "↑", tone: "good" };
+  }
+  if (
+    value === -1 ||
+    value === "-1" ||
+    normalized === "bearish" ||
+    normalized === "sell" ||
+    normalized === "down" ||
+    normalized === "red"
+  ) {
+    return { icon: "↓", tone: "bad" };
+  }
   return { icon: "-", tone: "neutral" };
+}
+
+function TrendBadge({ value }) {
+  const trend = formatTrend(value);
+  return (
+    <span className={`trend-cell trend-cell--${trend.tone}`}>
+      {trend.icon}
+    </span>
+  );
 }
 
 function getLogContractSignals(log) {
   return Array.isArray(log?.contract_signals) ? log.contract_signals : [];
 }
 
+function formatCompactOptionSymbol(value) {
+  const symbol = String(value ?? "")
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  if (!symbol) return "";
+  const match = symbol.match(/(\d{5})(CE|PE)$/);
+  if (!match) return symbol;
+  const prefix = symbol.includes("SENSEX") ? "S" : "N";
+  return `${prefix}-${match[1]}${match[2]}`;
+}
+
 function getLogContractLabel(item) {
-  return item?.input ?? item?.resolved_symbol ?? "Contract";
+  const symbol = item?.resolved_symbol ?? item?.input;
+  return symbol ? formatCompactOptionSymbol(symbol) : "Contract";
 }
 
 function ContractSignalList({ items, renderValue }) {
@@ -864,9 +1050,11 @@ function ContractSignalList({ items, renderValue }) {
 export function App() {
   const [activeView, setActiveView] = useState("overview");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [theme, setTheme] = useState(
-    () => window.localStorage.getItem("dashboard-theme") ?? "dark",
-  );
+  const [clockNow, setClockNow] = useState(() => new Date());
+  const [theme, setTheme] = useState(() => {
+    const savedTheme = window.localStorage.getItem("dashboard-theme");
+    return savedTheme === "light" || !savedTheme ? "warm" : savedTheme;
+  });
   const [data, setData] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsSource, setLogsSource] = useState("none");
@@ -877,11 +1065,18 @@ export function App() {
   const [actionMessage, setActionMessage] = useState("");
   const [triggeringSignal, setTriggeringSignal] = useState("");
   const [deletingTradeId, setDeletingTradeId] = useState("");
+  const [deleteTradeCandidate, setDeleteTradeCandidate] = useState(null);
   const [selectedDate, setSelectedDate] = useState(getTodayInIst());
   const [streamStatus, setStreamStatus] = useState("connecting");
   const [zerodhaAuthBusy, setZerodhaAuthBusy] = useState(false);
+  const [zerodhaConfirmOpen, setZerodhaConfirmOpen] = useState(false);
+  const [liveTradingConfirmOpen, setLiveTradingConfirmOpen] = useState(false);
   const [contractForms, setContractForms] = useState({
     option_contracts_1m: { ...DEFAULT_DAILY_SETUP_FORM },
+    option_contracts_1m_sensex: {
+      ...DEFAULT_DAILY_SETUP_FORM,
+      startingBalance: "100000",
+    },
   });
   const [setupEditorOpen, setSetupEditorOpen] = useState({});
   const [addMoneyAmount, setAddMoneyAmount] = useState("");
@@ -889,15 +1084,20 @@ export function App() {
   const [overviewRange, setOverviewRange] = useState(
     () => window.localStorage.getItem("overview-range") ?? "today",
   );
-  const [tradeStrategyFilter, setTradeStrategyFilter] = useState(
-    () => window.localStorage.getItem("trade-strategy-filter") ?? "all",
-  );
-  const [reportStrategyFilter, setReportStrategyFilter] = useState(
-    () => window.localStorage.getItem("report-strategy-filter") ?? "all",
-  );
-  const [logStrategyFilter, setLogStrategyFilter] = useState(
-    () => window.localStorage.getItem("log-strategy-filter") ?? "oneMinute",
-  );
+  const [tradeStrategyFilter, setTradeStrategyFilter] = useState(() => {
+    const saved = window.localStorage.getItem("trade-strategy-filter");
+    return saved === "oneMinute" ? "niftyOneMinute" : (saved ?? "all");
+  });
+  const [reportStrategyFilter, setReportStrategyFilter] = useState(() => {
+    const saved = window.localStorage.getItem("report-strategy-filter");
+    return saved === "oneMinute" ? "niftyOneMinute" : (saved ?? "all");
+  });
+  const [logStrategyFilter, setLogStrategyFilter] = useState(() => {
+    const saved = window.localStorage.getItem("log-strategy-filter");
+    return saved === "oneMinute"
+      ? "niftyOneMinute"
+      : (saved ?? "niftyOneMinute");
+  });
   const [showHourlyPnl, setShowHourlyPnl] = useState(
     () => window.localStorage.getItem("show-hourly-pnl") === "true",
   );
@@ -931,16 +1131,40 @@ export function App() {
     balance: "100000",
     lotSize: "75",
     targetPct: "3",
+    maxSignalCandlePct: "10",
+    strikeOffset: "0",
     stopLossPct: "8",
     stopLossMode: "signal_low",
     capStopLoss: true,
-    entryTiming: "next_minute",
+    entryTiming: "signal_close",
     entryTime: "09:30",
     exitTime: "15:10",
   });
   const [optionBacktestResult, setOptionBacktestResult] = useState(null);
   const [optionBacktestLoading, setOptionBacktestLoading] = useState(false);
+  const [niftyFiveMinuteBacktestForm, setNiftyFiveMinuteBacktestForm] =
+    useState({
+      mode: "dynamic",
+      contract1: "",
+      contract2: "",
+      contractSide: "PE",
+      startDate: getTodayInIst(),
+      endDate: getTodayInIst(),
+      balance: "100000",
+      targetPct: "8",
+      maxBodyPct: "10",
+      minBodyPct: "2",
+      stopLossPct: "8",
+      strikeOffset: "100",
+      entryTime: "09:30",
+      exitTime: "15:10",
+    });
+  const [niftyFiveMinuteBacktestResult, setNiftyFiveMinuteBacktestResult] =
+    useState(null);
+  const [niftyFiveMinuteBacktestLoading, setNiftyFiveMinuteBacktestLoading] =
+    useState(false);
   const [liveActionBusy, setLiveActionBusy] = useState("");
+  const [liveSetupMarket, setLiveSetupMarket] = useState("NIFTY");
   const dirtyContractStrategiesRef = useRef(new Set());
   const hydratedSetupSignaturesRef = useRef({});
 
@@ -948,6 +1172,14 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("dashboard-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setClockNow(new Date());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem("overview-range", overviewRange);
@@ -984,17 +1216,23 @@ export function App() {
           contract2: setup.effectiveContracts?.contract2 ?? "",
           scheduleStart: setup.scheduleStart ?? "09:20",
           scheduleEnd: setup.scheduleEnd ?? "15:00",
-          startingBalance: setup.startingBalance ?? data?.paperTrading?.capitalBase ?? 100000,
-          entrySignal: "BUY",
+          startingBalance:
+            setup.startingBalance ??
+            data?.paperTradingByStrategy?.[strategyKey]?.capitalBase ??
+            data?.paperTrading?.capitalBase ??
+            100000,
+          entrySignal: setup.entrySignal ?? "BUY",
           targetPct: setup.targetPct ?? 3,
           maxSignalCandlePct: setup.maxSignalCandlePct ?? 10,
+          strikeOffset: setup.strikeOffset ?? 0,
           stopLossMode: setup.stopLossMode ?? "signal_low",
           stopLossPct: setup.stopLossPct ?? 8,
           updatedAt: setup.dailyContracts?.updated_at ?? "",
         });
 
         if (dirtyContractStrategiesRef.current.has(strategyKey)) continue;
-        if (hydratedSetupSignaturesRef.current[strategyKey] === signature) continue;
+        if (hydratedSetupSignaturesRef.current[strategyKey] === signature)
+          continue;
 
         hydratedSetupSignaturesRef.current[strategyKey] = signature;
         next[strategyKey] = {
@@ -1003,10 +1241,16 @@ export function App() {
           contract2: setup.effectiveContracts?.contract2 ?? "",
           scheduleStart: setup.scheduleStart ?? "09:20",
           scheduleEnd: setup.scheduleEnd ?? "15:00",
-          startingBalance: String(setup.startingBalance ?? data?.paperTrading?.capitalBase ?? 100000),
-          entrySignal: "BUY",
+          startingBalance: String(
+            setup.startingBalance ??
+              data?.paperTradingByStrategy?.[strategyKey]?.capitalBase ??
+              data?.paperTrading?.capitalBase ??
+              100000,
+          ),
+          entrySignal: setup.entrySignal ?? "BUY",
           targetPct: String(setup.targetPct ?? 3),
           maxSignalCandlePct: String(setup.maxSignalCandlePct ?? 10),
+          strikeOffset: String(setup.strikeOffset ?? 0),
           stopLossMode: setup.stopLossMode ?? "signal_low",
           stopLossPct: String(setup.stopLossPct ?? 8),
         };
@@ -1016,6 +1260,7 @@ export function App() {
     });
   }, [
     data?.strategyConfig?.date,
+    data?.paperTradingByStrategy,
     data?.paperTrading?.capitalBase,
     data?.strategyConfig?.strategySetups,
   ]);
@@ -1105,7 +1350,7 @@ export function App() {
       if (!active) return;
       const intervalId = window.setInterval(async () => {
         try {
-          const response = await fetch(apiUrl("/api/dashboard"));
+          const response = await fetch(apiUrl("/api/market-quotes"));
           if (!response.ok) return;
           const payload = await response.json();
           setData((current) => ({
@@ -1322,12 +1567,18 @@ export function App() {
     setOptionBacktestForm((current) => ({
       ...current,
       [field]: value,
-      ...(field === "exchange" && value === "BFO"
-        ? { lotSize: current.lotSize === "75" ? "20" : current.lotSize }
-        : {}),
-      ...(field === "exchange" && value === "NFO"
-        ? { lotSize: current.lotSize === "20" ? "75" : current.lotSize }
-        : {}),
+      ...(field === "exchange" && value === "BFO" ? { lotSize: "20" } : {}),
+      ...(field === "exchange" && value === "NFO" ? { lotSize: "75" } : {}),
+    }));
+  }
+
+  function updateNiftyFiveMinuteBacktestField(field, value) {
+    setNiftyFiveMinuteBacktestForm((current) => ({
+      ...current,
+      [field]:
+        field === "contract1" || field === "contract2"
+          ? value.toUpperCase().replace(/\s+/g, "")
+          : value,
     }));
   }
 
@@ -1346,15 +1597,33 @@ export function App() {
     }));
   }
 
-  function fillStartingBalanceFromCash(strategyKey) {
-    const balanceLeft = Number(
-      paperTrading.cashBalance ?? paperTrading.capitalBase ?? 100000,
-    );
-    if (!Number.isFinite(balanceLeft) || balanceLeft <= 0) return;
-    updateContractField(strategyKey, "startingBalance", String(Math.floor(balanceLeft)));
+  function updateLiveOptionSide(side) {
+    const contract1 = side === "BOTH" ? "PE" : side;
+    const contract2 = side === "BOTH" ? "CE" : "";
+    updateContractField(liveSetupStrategyKey, "contract1", contract1);
+    updateContractField(liveSetupStrategyKey, "contract2", contract2);
   }
 
-  async function saveStrategyContracts(event, strategyKey = DAILY_SETUP_KEYS.oneMinuteBot) {
+  function fillStartingBalanceFromCash(strategyKey) {
+    const strategyPaperTrading =
+      data?.paperTradingByStrategy?.[strategyKey] ?? paperTrading;
+    const balanceLeft = Number(
+      strategyPaperTrading.cashBalance ??
+        strategyPaperTrading.capitalBase ??
+        100000,
+    );
+    if (!Number.isFinite(balanceLeft) || balanceLeft <= 0) return;
+    updateContractField(
+      strategyKey,
+      "startingBalance",
+      String(Math.floor(balanceLeft)),
+    );
+  }
+
+  async function saveStrategyContracts(
+    event,
+    strategyKey = DAILY_SETUP_KEYS.niftyOneMinuteBot,
+  ) {
     event.preventDefault();
     setContractSaving(true);
     setActionMessage("");
@@ -1373,6 +1642,7 @@ export function App() {
           startingBalance: Number(contractForm.startingBalance),
           targetPct: Number(contractForm.targetPct),
           maxSignalCandlePct: Number(contractForm.maxSignalCandlePct),
+          strikeOffset: Number(contractForm.strikeOffset),
           stopLossPct: Number(contractForm.stopLossPct),
         }),
       });
@@ -1404,7 +1674,10 @@ export function App() {
     }
   }
 
-  async function addPaperBalance(event) {
+  async function addPaperBalance(
+    event,
+    strategyKey = DAILY_SETUP_KEYS.niftyOneMinuteBot,
+  ) {
     event.preventDefault();
     const amount = Number(addMoneyAmount);
     if (!amount || amount <= 0) {
@@ -1420,11 +1693,13 @@ export function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, strategyKey }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail ?? `Balance update failed with ${response.status}`);
+        throw new Error(
+          payload.detail ?? `Balance update failed with ${response.status}`,
+        );
       }
       const payload = await response.json();
       setActionMessage(payload.message ?? "Paper balance updated.");
@@ -1442,10 +1717,6 @@ export function App() {
 
   async function deleteTrade(tradeId) {
     if (!tradeId || deletingTradeId) return;
-    const confirmed = window.confirm(
-      "Delete this trade from dashboard history and calculations?",
-    );
-    if (!confirmed) return;
 
     setDeletingTradeId(tradeId);
     setActionMessage("");
@@ -1479,6 +1750,7 @@ export function App() {
       );
     } finally {
       setDeletingTradeId("");
+      setDeleteTradeCandidate(null);
     }
   }
 
@@ -1585,7 +1857,9 @@ export function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Option report CSV export failed with ${response.status}`);
+        throw new Error(
+          `Option report CSV export failed with ${response.status}`,
+        );
       }
 
       const payload = await response.json();
@@ -1623,13 +1897,15 @@ export function App() {
           startDate: optionBacktestForm.startDate,
           endDate: optionBacktestForm.endDate,
           balance: Number(optionBacktestForm.balance),
-          lotSize: Number(optionBacktestForm.lotSize),
+          lotSize: optionBacktestForm.exchange === "BFO" ? 20 : 75,
           targetPct: Number(optionBacktestForm.targetPct),
+          maxSignalCandlePct: Number(optionBacktestForm.maxSignalCandlePct),
+          strikeOffset: Number(optionBacktestForm.strikeOffset),
           stopLossPct: Number(optionBacktestForm.stopLossPct),
           stopLossMode: optionBacktestForm.stopLossMode,
-          capStopLoss: Boolean(optionBacktestForm.capStopLoss),
-          requireVwap: Boolean(optionBacktestForm.requireVwap),
-          entryTiming: optionBacktestForm.entryTiming,
+          capStopLoss: optionBacktestForm.stopLossMode !== "percent",
+          requireVwap: false,
+          entryTiming: "signal_close",
           entryTime: optionBacktestForm.entryTime,
           exitTime: optionBacktestForm.exitTime,
         }),
@@ -1651,12 +1927,68 @@ export function App() {
     }
   }
 
+  async function runNiftyFiveMinuteBacktest(event) {
+    event.preventDefault();
+    setNiftyFiveMinuteBacktestLoading(true);
+    setActionMessage("");
+    setError("");
+
+    try {
+      const response = await fetch(apiUrl("/api/backtest/nifty-5m"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: niftyFiveMinuteBacktestForm.mode,
+          contract1: niftyFiveMinuteBacktestForm.contract1
+            .trim()
+            .toUpperCase(),
+          contract2: niftyFiveMinuteBacktestForm.contract2
+            .trim()
+            .toUpperCase(),
+          contractSide: niftyFiveMinuteBacktestForm.contractSide,
+          startDate: niftyFiveMinuteBacktestForm.startDate,
+          endDate: niftyFiveMinuteBacktestForm.endDate,
+          balance: Number(niftyFiveMinuteBacktestForm.balance),
+          targetPct: Number(niftyFiveMinuteBacktestForm.targetPct),
+          maxBodyPct: Number(niftyFiveMinuteBacktestForm.maxBodyPct),
+          minBodyPct: Number(niftyFiveMinuteBacktestForm.minBodyPct),
+          stopLossPct: Number(niftyFiveMinuteBacktestForm.stopLossPct),
+          strikeOffset: Number(niftyFiveMinuteBacktestForm.strikeOffset),
+          entryTime: niftyFiveMinuteBacktestForm.entryTime,
+          exitTime: niftyFiveMinuteBacktestForm.exitTime,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail ?? `NIFTY 5m backtest failed with ${response.status}`);
+      }
+
+      setNiftyFiveMinuteBacktestResult(await response.json());
+    } catch (backtestError) {
+      setError(
+        backtestError instanceof Error
+          ? backtestError.message
+          : "Unable to run NIFTY 5m backtest.",
+      );
+    } finally {
+      setNiftyFiveMinuteBacktestLoading(false);
+    }
+  }
+
   const recentAlerts = data?.recentAlerts ?? [];
   const status = data?.status ?? {};
   const schedule = data?.schedule ?? {};
   const strategyConfig = data?.strategyConfig ?? {};
   const marketQuotes = data?.marketQuotes ?? [];
-  const paperTrading = data?.paperTrading ?? {};
+  const paperTradingByStrategy = data?.paperTradingByStrategy ?? {};
+  const niftyPaperTrading =
+    paperTradingByStrategy.option_contracts_1m ?? data?.paperTrading ?? {};
+  const sensexPaperTrading =
+    paperTradingByStrategy.option_contracts_1m_sensex ?? {};
+  const paperTrading = niftyPaperTrading;
   const liveTrading = data?.liveTrading ?? {};
   const liveTradingStatus = liveTrading.status ?? {};
   const liveOrders = liveTrading.orders ?? [];
@@ -1664,40 +1996,125 @@ export function App() {
   const livePositions = liveTrading.positions ?? {};
   const liveMargins = liveTrading.margins ?? {};
   const liveBalance = liveTrading.balance ?? {};
-  const oneMinuteLiveSetup = strategyConfig.strategySetups?.option_contracts_1m ?? {};
+  const livePositionRows = [
+    ...(Array.isArray(livePositions.net) ? livePositions.net : []),
+    ...(Array.isArray(livePositions.day) ? livePositions.day : []),
+  ].filter(
+    (position, index, rows) =>
+      position?.tradingsymbol &&
+      rows.findIndex(
+        (candidate) =>
+          candidate?.tradingsymbol === position.tradingsymbol &&
+          candidate?.product === position.product,
+      ) === index,
+  );
+  const liveMarginRows = [
+    ["Available Cash", liveBalance.cash],
+    ["Live Balance", liveBalance.liveBalance],
+    ["Opening Balance", liveBalance.openingBalance],
+    ["Net Margin", liveBalance.net],
+    ["Used Debits", liveBalance.utilisedDebits],
+    ["SPAN", liveBalance.span],
+    ["Exposure", liveBalance.exposure],
+    ["Collateral", liveBalance.collateral],
+  ];
+  const liveSetupStrategyKey =
+    liveSetupMarket === "SENSEX"
+      ? DAILY_SETUP_KEYS.sensexOneMinuteBot
+      : DAILY_SETUP_KEYS.niftyOneMinuteBot;
+  const liveSetupLabel =
+    liveSetupMarket === "SENSEX" ? "Sensex 1m bot" : "Nifty 1m bot";
+  const liveSelectedSetup =
+    strategyConfig.strategySetups?.[liveSetupStrategyKey] ?? {};
+  const liveSelectedForm =
+    contractForms[liveSetupStrategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
+  const liveEnabledStrategyKeys = Array.isArray(
+    liveTradingStatus.enabledStrategyKeys,
+  )
+    ? liveTradingStatus.enabledStrategyKeys
+    : [];
+  const liveSelectedStrategyEnabled =
+    Boolean(liveTradingStatus.enabled) &&
+    liveEnabledStrategyKeys.includes(liveSetupStrategyKey);
+  const liveSelectedSide =
+    liveSelectedForm.contract1 === "PE" && liveSelectedForm.contract2 === "CE"
+      ? "BOTH"
+      : liveSelectedForm.contract1 === "CE"
+        ? "CE"
+        : "PE";
+  const liveSelectedContracts = [
+    liveSelectedSetup.effectiveContracts?.contract1,
+    liveSelectedSetup.effectiveContracts?.contract2,
+  ]
+    .filter(Boolean)
+    .join(" / ");
   const activeTrade = paperTrading.activeTrade ?? null;
-  const activeTrades = paperTrading.activeTrades ?? (activeTrade ? [activeTrade] : []);
-  const tradeHistory = paperTrading.tradeHistory ?? [];
-  const summaryByRange = paperTrading.summaryByRange ?? {};
+  const niftyActiveTrades =
+    paperTrading.activeTrades ?? (activeTrade ? [activeTrade] : []);
+  const niftyTradeHistory = paperTrading.tradeHistory ?? [];
+  const rawSensexActiveTrade = sensexPaperTrading.activeTrade ?? null;
+  const rawSensexActiveTrades =
+    sensexPaperTrading.activeTrades ??
+    (rawSensexActiveTrade ? [rawSensexActiveTrade] : []);
+  const rawSensexTradeHistory = sensexPaperTrading.tradeHistory ?? [];
+  const activeTrades = [...niftyActiveTrades, ...rawSensexActiveTrades];
+  const tradeHistory = [...niftyTradeHistory, ...rawSensexTradeHistory].sort(
+    (first, second) =>
+      new Date(second.entry_time ?? second.entryTime ?? 0).getTime() -
+      new Date(first.entry_time ?? first.entryTime ?? 0).getTime(),
+  );
   const dailySummary = paperTrading.dailySummary ?? {};
   const zerodha = data?.zerodha ?? {};
-  const selectedRangeSummary = summaryByRange[overviewRange] ??
-    summaryByRange.today ?? {
-      runningPnl: paperTrading.runningPnl ?? 0,
-      realizedPnl: paperTrading.realizedPnl ?? 0,
-      unrealizedPnl: activeTrade?.unrealizedPnl ?? 0,
-      tradeCount: dailySummary.tradeCount ?? 0,
-      winCount: dailySummary.winCount ?? 0,
-      lossCount: dailySummary.lossCount ?? 0,
-    };
+  const combinedCapitalBase =
+    Number(niftyPaperTrading.capitalBase ?? 0) +
+      Number(sensexPaperTrading.capitalBase ?? 0) ||
+    Number(paperTrading.capitalBase ?? 0);
+  const selectedRangeSummary = buildTradeSummaryForRange(
+    tradeHistory,
+    activeTrades,
+    overviewRange,
+  );
   const selectedRangeMeta =
     OVERVIEW_RANGE_OPTIONS.find((option) => option.id === overviewRange) ??
     OVERVIEW_RANGE_OPTIONS[0];
   const winsLosses = `${formatCount(selectedRangeSummary.winCount)} / ${formatCount(selectedRangeSummary.lossCount)}`;
   const backtestTrades = backtestResult?.trades ?? [];
   const backtestHourlyPnlReport = buildHourlyPnlReport(backtestTrades, "total");
-  const backtestWeekdayPnlReport = buildWeekdayPnlReport(backtestTrades, "total");
+  const backtestWeekdayPnlReport = buildWeekdayPnlReport(
+    backtestTrades,
+    "total",
+  );
   const optionBacktestTrades = optionBacktestResult?.trades ?? [];
-  const optionBacktestHourlyPnlReport = buildHourlyPnlReport(optionBacktestTrades, "total");
-  const optionBacktestWeekdayPnlReport = buildWeekdayPnlReport(optionBacktestTrades, "total");
-  const isOneMinuteLog = (log) =>
+  const niftyFiveMinuteBacktestTrades =
+    niftyFiveMinuteBacktestResult?.trades ?? [];
+  const niftyFiveMinuteBacktestSkipped =
+    niftyFiveMinuteBacktestResult?.skipped ?? [];
+  const optionContractStats = optionBacktestResult?.data?.contractStats ?? [];
+  const optionTypeStats = optionBacktestResult?.data?.optionTypeStats ?? [];
+  const optionBacktestHourlyPnlReport = buildHourlyPnlReport(
+    optionBacktestTrades,
+    "total",
+  );
+  const optionBacktestWeekdayPnlReport = buildWeekdayPnlReport(
+    optionBacktestTrades,
+    "total",
+  );
+  const isNiftyOneMinuteLog = (log) =>
     String(log?.strategy_mode ?? "").toLowerCase() === "option_contracts" ||
     String(log?.strategy_key ?? "").toLowerCase() === "option_contracts_1m" ||
     String(log?.interval ?? "").toLowerCase() === "1m";
+  const isSensexOneMinuteLog = (log) =>
+    String(log?.strategy_key ?? "").toLowerCase() ===
+      "option_contracts_1m_sensex" ||
+    String(log?.underlying ?? "").toUpperCase() === "SENSEX";
   const filteredLogs =
-    logStrategyFilter === "oneMinute"
-      ? logs.filter(isOneMinuteLog)
-      : logs;
+    logStrategyFilter === "niftyOneMinute"
+      ? logs.filter(
+          (log) => isNiftyOneMinuteLog(log) && !isSensexOneMinuteLog(log),
+        )
+      : logStrategyFilter === "sensexOneMinute"
+        ? logs.filter(isSensexOneMinuteLog)
+        : logs;
   const selectedLogFilterMeta =
     STRATEGY_FILTER_OPTIONS.find((option) => option.id === logStrategyFilter) ??
     STRATEGY_FILTER_OPTIONS[1];
@@ -1718,13 +2135,67 @@ export function App() {
     },
     { total: 0, errors: 0, skipped: 0, actions: 0 },
   );
-  const openTradeLabel = activeTrade ? (
+  const getLatestTrendSnapshot = (logList, predicate) => {
+    const sortedLogs = [...logList].sort((first, second) => {
+      const firstDate = parseIstDate(first.run_at);
+      const secondDate = parseIstDate(second.run_at);
+      return (secondDate?.getTime() ?? 0) - (firstDate?.getTime() ?? 0);
+    });
+
+    for (const log of sortedLogs) {
+      if (!predicate(log)) continue;
+      const contractSignals = getLogContractSignals(log);
+      const trendSource =
+        contractSignals.find(
+          (item) =>
+            item.st_10_1_trend != null || item.st_10_3_trend != null,
+        ) ?? log;
+      if (
+        trendSource.st_10_1_trend == null &&
+        trendSource.st_10_3_trend == null
+      ) {
+        continue;
+      }
+
+      return {
+        contract:
+          trendSource.resolved_symbol ??
+          log.option_symbol ??
+          log.contractInput ??
+          log.symbol ??
+          "Not available",
+        fastTrend: trendSource.st_10_1_trend,
+        slowTrend: trendSource.st_10_3_trend,
+        candleTime: trendSource.candle_time ?? log.candle_time ?? log.run_at,
+      };
+    }
+
+    return null;
+  };
+  const latestNiftyTrendLog = getLatestTrendSnapshot(
+    logs,
+    (log) => isNiftyOneMinuteLog(log) && !isSensexOneMinuteLog(log),
+  );
+  const latestSensexTrendLog = getLatestTrendSnapshot(
+    logs,
+    isSensexOneMinuteLog,
+  );
+  const combinedOpenTrade = activeTrades[0] ?? null;
+  const openTradeLabel = combinedOpenTrade ? (
     <span className="open-trade-label">
-      {formatSignal(activeTrade.signal)}
+      {formatSignal(combinedOpenTrade.signal)}
       <span className="open-trade-label__sep">·</span>
       <span>
-        {activeTrade.option_symbol ?? activeTrade.optionSymbol ?? "Contract"}
+        {combinedOpenTrade.option_symbol ??
+          combinedOpenTrade.optionSymbol ??
+          "Contract"}
       </span>
+      {activeTrades.length > 1 ? (
+        <>
+          <span className="open-trade-label__sep">·</span>
+          <span>{activeTrades.length} open</span>
+        </>
+      ) : null}
     </span>
   ) : (
     "No active trade"
@@ -1733,22 +2204,47 @@ export function App() {
   const isOneMinuteOptionTrade = (trade) =>
     String(trade?.strategy_mode ?? trade?.strategyMode ?? "").toLowerCase() ===
     "option_contracts";
-  const oneMinuteOptionTrades = tradeHistory.filter(isOneMinuteOptionTrade);
-  const oneMinuteActiveTrades = activeTrades.filter(isOneMinuteOptionTrade);
+  const isNiftyOptionTrade = (trade) => {
+    const strategyKey = trade?.strategy_key ?? trade?.strategyKey;
+    if (strategyKey) return strategyKey === DAILY_SETUP_KEYS.niftyOneMinuteBot;
+    return isOneMinuteOptionTrade(trade);
+  };
+  const isSensexOptionTrade = (trade) =>
+    (trade?.strategy_key ?? trade?.strategyKey) ===
+      DAILY_SETUP_KEYS.sensexOneMinuteBot ||
+    String(trade?.underlying ?? "").toUpperCase() === "SENSEX";
+  const oneMinuteOptionTrades = tradeHistory.filter(isNiftyOptionTrade);
+  const oneMinuteActiveTrades = niftyActiveTrades.filter(isNiftyOptionTrade);
+  const sensexTradeHistory = rawSensexTradeHistory;
+  const sensexActiveTrades = rawSensexActiveTrades;
+  const sensexOneMinuteOptionTrades =
+    sensexTradeHistory.filter(isSensexOptionTrade);
+  const sensexOneMinuteActiveTrades =
+    sensexActiveTrades.filter(isSensexOptionTrade);
   const filterTradesByStrategy = (filterId) => {
-    if (filterId === "oneMinute") return oneMinuteOptionTrades;
+    if (filterId === "niftyOneMinute") return oneMinuteOptionTrades;
+    if (filterId === "sensexOneMinute") return sensexOneMinuteOptionTrades;
     return tradeHistory;
   };
   const filteredTradeHistory = filterTradesByStrategy(tradeStrategyFilter);
   const reportTrades = filterTradesByStrategy(reportStrategyFilter);
   const selectedTradeFilterMeta =
-    STRATEGY_FILTER_OPTIONS.find((option) => option.id === tradeStrategyFilter) ??
-    STRATEGY_FILTER_OPTIONS[0];
+    STRATEGY_FILTER_OPTIONS.find(
+      (option) => option.id === tradeStrategyFilter,
+    ) ?? STRATEGY_FILTER_OPTIONS[0];
   const selectedReportFilterMeta =
-    STRATEGY_FILTER_OPTIONS.find((option) => option.id === reportStrategyFilter) ??
-    STRATEGY_FILTER_OPTIONS[0];
+    STRATEGY_FILTER_OPTIONS.find(
+      (option) => option.id === reportStrategyFilter,
+    ) ?? STRATEGY_FILTER_OPTIONS[0];
   const hourlyPnlReport = buildHourlyPnlReport(reportTrades, overviewRange);
   const reportMetrics = buildReportMetrics(reportTrades, overviewRange);
+  const reportRangeTrades = filterTradesForRange(reportTrades, overviewRange);
+  const reportWinCount = reportRangeTrades.filter(
+    (trade) => String(trade.status ?? "").toUpperCase() === "WIN",
+  ).length;
+  const reportLossCount = reportRangeTrades.filter(
+    (trade) => String(trade.status ?? "").toUpperCase() === "LOSS",
+  ).length;
   const weekdayPnlReport = buildWeekdayPnlReport(reportTrades, overviewRange);
   const optionTypeReport = buildOptionTypeReport(reportTrades, overviewRange);
 
@@ -1782,6 +2278,34 @@ export function App() {
     oneMinuteOptionTrades,
     oneMinuteActiveTrades,
   );
+  const sensexOneMinuteBotSummary = buildBotPageSummary(
+    sensexOneMinuteOptionTrades,
+    sensexOneMinuteActiveTrades,
+  );
+  const overviewBotCards = [
+    {
+      label: "NIFTY",
+      strategyKey: DAILY_SETUP_KEYS.niftyOneMinuteBot,
+      paperTrading: niftyPaperTrading,
+      activeTrades: oneMinuteActiveTrades,
+      summary: oneMinuteBotSummary,
+      trendLog: latestNiftyTrendLog,
+      setup:
+        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.niftyOneMinuteBot] ??
+        {},
+    },
+    {
+      label: "SENSEX",
+      strategyKey: DAILY_SETUP_KEYS.sensexOneMinuteBot,
+      paperTrading: sensexPaperTrading,
+      activeTrades: sensexOneMinuteActiveTrades,
+      summary: sensexOneMinuteBotSummary,
+      trendLog: latestSensexTrendLog,
+      setup:
+        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.sensexOneMinuteBot] ??
+        {},
+    },
+  ];
   const signalAlertColumns = [
     { id: "signal", label: "Signal" },
     { id: "optionSymbol", label: "Contract" },
@@ -1820,6 +2344,67 @@ export function App() {
     { id: "st_10_3_trend", label: "Slow Trend" },
     { id: "message", label: "Message" },
   ];
+  const liveOrderColumns = [
+    { id: "order_id", label: "Order ID" },
+    { id: "time", label: "Time" },
+    { id: "tradingsymbol", label: "Symbol" },
+    { id: "side", label: "Side" },
+    { id: "quantity", label: "Qty" },
+    { id: "order_type", label: "Type" },
+    { id: "status", label: "Status" },
+    { id: "average_price", label: "Avg Price" },
+    { id: "actions", label: "Actions" },
+  ];
+  const backtestTradeColumns = [
+    { id: "signal", label: "Signal" },
+    { id: "signalMode", label: "Signal Rule" },
+    { id: "entryTime", label: "Entry" },
+    { id: "entryTiming", label: "Entry Trigger" },
+    { id: "exitTime", label: "Exit" },
+    { id: "instrument", label: "Instrument" },
+    { id: "strike", label: "Strike" },
+    { id: "quantity", label: "Qty" },
+    { id: "baseEntryPrice", label: "Market Entry" },
+    { id: "entryPrice", label: "Exec Entry" },
+    { id: "baseExitPrice", label: "Market Exit" },
+    { id: "exitPrice", label: "Exec Exit" },
+    { id: "stopLoss", label: "SL" },
+    { id: "stopLossRule", label: "SL Rule" },
+    { id: "target", label: "Target" },
+    { id: "netPnl", label: "Net PnL" },
+    { id: "status", label: "Status" },
+    { id: "exitReason", label: "Exit Reason" },
+    { id: "executionSource", label: "Source" },
+  ];
+  const optionBacktestTradeColumns = [
+    { id: "signal", label: "Signal" },
+    { id: "entryTime", label: "Entry" },
+    { id: "exitTime", label: "Exit" },
+    { id: "optionSymbol", label: "Contract" },
+    { id: "quantity", label: "Qty" },
+    { id: "entryPrice", label: "Exec Entry" },
+    { id: "exitPrice", label: "Exec Exit" },
+    { id: "stopLoss", label: "SL" },
+    { id: "target", label: "Target" },
+    { id: "netPnl", label: "Net PnL" },
+    { id: "status", label: "Status" },
+    { id: "exitReason", label: "Exit Reason" },
+  ];
+  const optionContractStatsColumns = [
+    { id: "optionSymbol", label: "Contract" },
+    { id: "selectedSignals", label: "Signals" },
+    { id: "fastBoth", label: "Fast / Both" },
+    { id: "trades", label: "Trades" },
+    { id: "skipped", label: "Skipped" },
+    { id: "netPnl", label: "Net PnL" },
+  ];
+  const optionTypeStatsColumns = [
+    { id: "optionType", label: "Type" },
+    { id: "trades", label: "Trades" },
+    { id: "winsLosses", label: "Wins / Losses" },
+    { id: "winRate", label: "Win Rate" },
+    { id: "netPnl", label: "Net PnL" },
+  ];
 
   const [selectedSignalAlertColumns, setSelectedSignalAlertColumns] = useState(
     () => loadSelectedColumns("signal-alerts", signalAlertColumns),
@@ -1829,6 +2414,31 @@ export function App() {
   const [selectedRunLogColumns, setSelectedRunLogColumns] = useState(() =>
     loadSelectedColumns("run-logs", runLogColumns),
   );
+  const [selectedLiveOrderColumns, setSelectedLiveOrderColumns] = useState(() =>
+    loadSelectedColumns("live-orders", liveOrderColumns),
+  );
+  const [selectedBacktestTradeColumns, setSelectedBacktestTradeColumns] =
+    useState(() =>
+      loadSelectedColumns("backtest-trades", backtestTradeColumns),
+    );
+  const [
+    selectedOptionBacktestTradeColumns,
+    setSelectedOptionBacktestTradeColumns,
+  ] = useState(() =>
+    loadSelectedColumns("option-backtest-trades", optionBacktestTradeColumns),
+  );
+  const [
+    selectedOptionContractStatsColumns,
+    setSelectedOptionContractStatsColumns,
+  ] = useState(() =>
+    loadSelectedColumns("option-contract-stats", optionContractStatsColumns),
+  );
+  const [selectedOptionTypeStatsColumns, setSelectedOptionTypeStatsColumns] =
+    useState(() =>
+      loadSelectedColumns("option-type-stats", optionTypeStatsColumns),
+    );
+  const [tablePages, setTablePages] = useState({});
+  const [tablePageSizes, setTablePageSizes] = useState({});
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -1851,6 +2461,41 @@ export function App() {
     );
   }, [selectedRunLogColumns]);
 
+  useEffect(() => {
+    window.localStorage.setItem(
+      `${TABLE_COLUMN_STORAGE_PREFIX}live-orders`,
+      JSON.stringify(selectedLiveOrderColumns),
+    );
+  }, [selectedLiveOrderColumns]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      `${TABLE_COLUMN_STORAGE_PREFIX}backtest-trades`,
+      JSON.stringify(selectedBacktestTradeColumns),
+    );
+  }, [selectedBacktestTradeColumns]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      `${TABLE_COLUMN_STORAGE_PREFIX}option-backtest-trades`,
+      JSON.stringify(selectedOptionBacktestTradeColumns),
+    );
+  }, [selectedOptionBacktestTradeColumns]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      `${TABLE_COLUMN_STORAGE_PREFIX}option-contract-stats`,
+      JSON.stringify(selectedOptionContractStatsColumns),
+    );
+  }, [selectedOptionContractStatsColumns]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      `${TABLE_COLUMN_STORAGE_PREFIX}option-type-stats`,
+      JSON.stringify(selectedOptionTypeStatsColumns),
+    );
+  }, [selectedOptionTypeStatsColumns]);
+
   function toggleColumn(columnId, selected, setSelected, columns) {
     setSelected((current) => {
       const isSelected = current.includes(columnId);
@@ -1863,6 +2508,40 @@ export function App() {
     });
   }
 
+  function getTablePagination(tableKey, totalRows) {
+    const pageSize = tablePageSizes[tableKey] ?? DEFAULT_TABLE_PAGE_SIZE;
+    const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+    const page = Math.min(Math.max(tablePages[tableKey] ?? 1, 1), totalPages);
+    return {
+      page,
+      pageSize,
+      startIndex: (page - 1) * pageSize,
+      endIndex: page * pageSize,
+      controls: {
+        page,
+        pageSize,
+        total: totalRows,
+        onPageChange: (nextPage) =>
+          setTablePages((current) => ({ ...current, [tableKey]: nextPage })),
+        onPageSizeChange: (nextPageSize) => {
+          setTablePageSizes((current) => ({
+            ...current,
+            [tableKey]: nextPageSize,
+          }));
+          setTablePages((current) => ({ ...current, [tableKey]: 1 }));
+        },
+      },
+    };
+  }
+
+  function paginateRows(tableKey, rows) {
+    const pagination = getTablePagination(tableKey, rows.length);
+    return {
+      rows: rows.slice(pagination.startIndex, pagination.endIndex),
+      pagination,
+    };
+  }
+
   const visibleSignalAlertColumns = signalAlertColumns.filter((column) =>
     selectedSignalAlertColumns.includes(column.id),
   );
@@ -1872,6 +2551,43 @@ export function App() {
   const visibleRunLogColumns = runLogColumns.filter((column) =>
     selectedRunLogColumns.includes(column.id),
   );
+  const visibleLiveOrderColumns = liveOrderColumns.filter((column) =>
+    selectedLiveOrderColumns.includes(column.id),
+  );
+  const visibleBacktestTradeColumns = backtestTradeColumns.filter((column) =>
+    selectedBacktestTradeColumns.includes(column.id),
+  );
+  const visibleOptionBacktestTradeColumns = optionBacktestTradeColumns.filter(
+    (column) => selectedOptionBacktestTradeColumns.includes(column.id),
+  );
+  const visibleOptionContractStatsColumns = optionContractStatsColumns.filter(
+    (column) => selectedOptionContractStatsColumns.includes(column.id),
+  );
+  const visibleOptionTypeStatsColumns = optionTypeStatsColumns.filter(
+    (column) => selectedOptionTypeStatsColumns.includes(column.id),
+  );
+  const overviewAlertsTable = paginateRows("overview-alerts", recentAlerts);
+  const signalsTable = paginateRows("signal-alerts", recentAlerts);
+  const overviewTradeHistoryTable = paginateRows(
+    "overview-trades",
+    tradeHistory,
+  );
+  const tradeHistoryTable = paginateRows("trade-history", filteredTradeHistory);
+  const liveOrdersTable = paginateRows("live-orders", liveOrders);
+  const backtestTradesTable = paginateRows("backtest-trades", backtestTrades);
+  const optionBacktestTradesTable = paginateRows(
+    "option-backtest-trades",
+    optionBacktestTrades,
+  );
+  const optionContractStatsTable = paginateRows(
+    "option-contract-stats",
+    optionContractStats,
+  );
+  const optionTypeStatsTable = paginateRows(
+    "option-type-stats",
+    optionTypeStats,
+  );
+  const runLogsTable = paginateRows("run-logs", filteredLogs);
   const activeNavOption =
     NAV_OPTIONS.find((option) => option.id === activeView) ?? NAV_OPTIONS[0];
 
@@ -1885,6 +2601,16 @@ export function App() {
       setError("ZERODHA_API_KEY is not configured in the backend.");
       return;
     }
+    setZerodhaConfirmOpen(true);
+  }
+
+  function confirmZerodhaConnect() {
+    if (!zerodha.loginUrl) {
+      setZerodhaConfirmOpen(false);
+      setError("ZERODHA_API_KEY is not configured in the backend.");
+      return;
+    }
+    setZerodhaAuthBusy(true);
     window.location.href = zerodha.loginUrl;
   }
 
@@ -1916,16 +2642,31 @@ export function App() {
       const response = await fetch(apiUrl("/api/live-trading/toggle"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({
+          enabled,
+          enabledStrategyKeys: enabled
+            ? [liveSetupStrategyKey]
+            : liveEnabledStrategyKeys,
+        }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail ?? `Live trading toggle failed with ${response.status}`);
+        throw new Error(
+          payload.detail ??
+            `Live trading toggle failed with ${response.status}`,
+        );
       }
-      setActionMessage(enabled ? "Live trading enabled." : "Live trading disabled.");
+      setActionMessage(
+        enabled ? "Live trading enabled." : "Live trading disabled.",
+      );
+      setLiveTradingConfirmOpen(false);
       await refreshLiveTradingData();
     } catch (liveError) {
-      setError(liveError instanceof Error ? liveError.message : "Unable to update live trading.");
+      setError(
+        liveError instanceof Error
+          ? liveError.message
+          : "Unable to update live trading.",
+      );
     } finally {
       setLiveActionBusy("");
     }
@@ -1936,26 +2677,31 @@ export function App() {
     setError("");
     setActionMessage("");
     try {
-      const response = await fetch(apiUrl(`/api/live-trading/orders/${orderId}`), {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ variety: "regular" }),
-      });
+      const response = await fetch(
+        apiUrl(`/api/live-trading/orders/${orderId}`),
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ variety: "regular" }),
+        },
+      );
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail ?? `Order cancel failed with ${response.status}`);
+        throw new Error(
+          payload.detail ?? `Order cancel failed with ${response.status}`,
+        );
       }
       setActionMessage(`Live order cancelled: ${orderId}`);
       await refreshLiveTradingData();
     } catch (liveError) {
-      setError(liveError instanceof Error ? liveError.message : "Unable to cancel live order.");
+      setError(
+        liveError instanceof Error
+          ? liveError.message
+          : "Unable to cancel live order.",
+      );
     } finally {
       setLiveActionBusy("");
     }
-  }
-
-  function toggleTheme() {
-    setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"));
   }
 
   function renderBotPage({
@@ -1968,18 +2714,29 @@ export function App() {
     currentActiveTrades,
     summary,
     showContracts,
+    botPaperTrading = paperTrading,
   }) {
     const firstActiveTrade = currentActiveTrades[0] ?? null;
     const setupForm = contractForms[strategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
-    const setupConfig = data?.strategyConfig?.strategySetups?.[strategyKey] ?? {};
+    const setupConfig =
+      data?.strategyConfig?.strategySetups?.[strategyKey] ?? {};
     const setupTitle = showContracts ? "1m daily setup" : "5m daily setup";
+    const setupLabel = setupConfig.label ?? "1m option bot";
+    const contractPlaceholder1 = "PE";
+    const contractPlaceholder2 = "CE";
     const setupSavedToday = Boolean(setupConfig.usesDailySetup);
     const setupSavedAt = setupConfig.dailyContracts?.updated_at;
     const editorOpen = setupEditorOpen[strategyKey] ?? !setupSavedToday;
+    const side1 = setupConfig.effectiveContracts?.contract1 || "-";
+    const side2 = setupConfig.effectiveContracts?.contract2 || "-";
+    const nextExpiry =
+      setupConfig.nextExpiry?.label ??
+      setupConfig.nextExpiry?.date ??
+      "Not available";
     const setupSubtitle = showContracts
       ? setupSavedToday
         ? "Today's setup is saved. Edit the fields below and save again to update the same setup."
-        : "Today's setup is not set. Save the two option contracts and risk settings before the bot scans."
+        : "Today's setup is not set. Save at least Contract 1 and risk settings before the bot scans."
       : "Save the trading window, balance, and risk settings used by the 5-minute bot today.";
     return (
       <section className="section-block">
@@ -2006,124 +2763,160 @@ export function App() {
           ))}
         </div>
 
-        <section className="metrics-grid">
-          <MetricCard label="Schedule" value={scheduleLabel} />
-          <MetricCard
-            label="Running PnL"
-            value={
-              <PnlValue
-                value={summary.runningPnl}
-                baseValue={paperTrading.capitalBase}
-              />
-            }
-            tone={getPnlTone(summary.runningPnl)}
-          />
-          <MetricCard
-            label="Realized PnL"
-            value={
-              <PnlValue
-                value={summary.realizedPnl}
-                baseValue={paperTrading.capitalBase}
-              />
-            }
-            tone={getPnlTone(summary.realizedPnl)}
-          />
-          <MetricCard
-            label="Unrealized PnL"
-            value={
-              <PnlValue
-                value={summary.unrealizedPnl}
-                baseValue={paperTrading.capitalBase}
-              />
-            }
-            tone={getPnlTone(summary.unrealizedPnl)}
-          />
-          <MetricCard label={selectedRangeMeta.tradesLabel} value={formatCount(summary.tradeCount)} />
-          <MetricCard
-            label="Wins / Losses"
-            value={`${formatCount(summary.winCount)} / ${formatCount(summary.lossCount)}`}
-          />
-          {showContracts ? (
-            <MetricCard
-              label="Cash Balance"
-              value={<PnlValue value={paperTrading.cashBalance ?? paperTrading.capitalBase} />}
-              tone={getPnlTone(paperTrading.cashBalance ?? paperTrading.capitalBase)}
-            />
-          ) : null}
-        </section>
-
-        {showContracts ? (
-          <section className="content-grid">
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">Option Contracts</p>
-                <p className="panel-subtitle">
-                  Daily contracts used by the 1-minute option bot.
-                </p>
-              </div>
+        <section
+          className={`panel bot-command-card bot-command-card--${getPnlTone(summary.runningPnl)}`}
+        >
+          <div className="bot-command-card__top">
+            <div>
+              <p className="eyebrow">
+                {showContracts ? "1m option bot" : "Signal bot"}
+              </p>
+              <h2>{title}</h2>
+              <p className="bot-command-card__subtitle">{scheduleLabel}</p>
             </div>
-            <dl className="status-list">
+            <span
+              className={`status-pill status-pill--${firstActiveTrade ? "warn" : "neutral"}`}
+            >
+              {firstActiveTrade
+                ? "Active Trade"
+                : setupSavedToday
+                  ? "Ready"
+                  : "Setup Needed"}
+            </span>
+          </div>
+
+          <div className="bot-command-card__main">
+            <div className="bot-command-card__pnl">
+              <span>Running PnL</span>
+              <strong>
+                <PnlValue
+                  value={summary.runningPnl}
+                  baseValue={botPaperTrading.capitalBase}
+                />
+              </strong>
+            </div>
+            <dl className="bot-command-card__stats">
               <div>
-                <dt>Contract 1</dt>
-                <dd>{strategyConfig.effectiveContracts?.contract1 || "-"}</dd>
+                <dt>Cash Balance</dt>
+                <dd>
+                  {formatCurrency(
+                    botPaperTrading.cashBalance ?? botPaperTrading.capitalBase,
+                  )}
+                </dd>
               </div>
               <div>
-                <dt>Contract 2</dt>
-                <dd>{strategyConfig.effectiveContracts?.contract2 || "-"}</dd>
+                <dt>Realized</dt>
+                <dd>
+                  <PnlValue
+                    value={summary.realizedPnl}
+                    baseValue={botPaperTrading.capitalBase}
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt>Unrealized</dt>
+                <dd>
+                  <PnlValue
+                    value={summary.unrealizedPnl}
+                    baseValue={botPaperTrading.capitalBase}
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt>{selectedRangeMeta.tradesLabel}</dt>
+                <dd>{formatCount(summary.tradeCount)}</dd>
+              </div>
+              <div>
+                <dt>Wins / Losses</dt>
+                <dd>
+                  {formatCount(summary.winCount)} /{" "}
+                  {formatCount(summary.lossCount)}
+                </dd>
+              </div>
+              <div>
+                <dt>Option Sides</dt>
+                <dd>
+                  {side1} / {side2}
+                </dd>
+              </div>
+              <div>
+                <dt>Next Expiry</dt>
+                <dd>{nextExpiry}</dd>
               </div>
               <div>
                 <dt>Saved Today</dt>
-                <dd>{strategyConfig.usesDailyContracts ? "Yes" : "No"}</dd>
+                <dd>{setupSavedToday ? "Yes" : "No"}</dd>
               </div>
             </dl>
-          </article>
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">Add Paper Money</p>
-                <p className="panel-subtitle">
-                  Increase the live paper balance used for the next trade.
-                </p>
-              </div>
+          </div>
+
+          <div className="bot-command-card__footer">
+            <div className="bot-command-card__trade">
+              <span className="metric-label">Current Active Trade</span>
+              {firstActiveTrade ? (
+                <div className="bot-command-card__trade-line">
+                  {formatSignal(firstActiveTrade.signal)}
+                  <strong>
+                    {formatCompactOptionSymbol(firstActiveTrade.option_symbol)}
+                  </strong>
+                  <span>
+                    Entry {formatCurrency(firstActiveTrade.entry_price)} · Live{" "}
+                    {formatCurrency(firstActiveTrade.livePrice)}
+                  </span>
+                  <PnlValue
+                    value={firstActiveTrade.unrealizedPnl}
+                    baseValue={firstActiveTrade.capital_used}
+                  />
+                </div>
+              ) : (
+                <span className="muted-cell">No active trade</span>
+              )}
             </div>
-            <form className="backtest-form" onSubmit={addPaperBalance}>
-              <label className="form-field">
-                Amount
-                <input
-                  type="number"
-                  min="1"
-                  value={addMoneyAmount}
-                  onChange={(event) => setAddMoneyAmount(event.target.value)}
-                  placeholder="10000"
-                />
-              </label>
-              <button type="submit" className="action-button">
-                Add Money
-              </button>
-            </form>
-          </article>
-          </section>
-        ) : null}
+
+            {showContracts ? (
+              <form
+                className="bot-command-card__money-form"
+                onSubmit={(event) => addPaperBalance(event, strategyKey)}
+              >
+                <label className="form-field">
+                  Add Paper Money
+                  <input
+                    type="number"
+                    min="1"
+                    value={addMoneyAmount}
+                    onChange={(event) => setAddMoneyAmount(event.target.value)}
+                    placeholder="10000"
+                  />
+                </label>
+                <button type="submit" className="action-button">
+                  Add
+                </button>
+              </form>
+            ) : null}
+          </div>
+        </section>
 
         <section className="panel">
           <div className="panel-header">
             <div>
               <p className="panel-title">{setupTitle}</p>
-              <p className="panel-subtitle">{setupSubtitle}</p>
             </div>
           </div>
 
           {showContracts ? (
-            <div className={`setup-status ${setupSavedToday ? "setup-status--saved" : "setup-status--missing"}`}>
+            <div
+              className={`setup-status ${setupSavedToday ? "setup-status--saved" : "setup-status--missing"}`}
+            >
               <div>
                 <p className="setup-status__title">
-                  {setupSavedToday ? "Today's 1m setup is saved" : "Today's 1m setup is not set"}
+                  {setupSavedToday
+                    ? "Today's 1m setup is saved"
+                    : "Today's 1m setup is not set"}
                 </p>
                 <p className="setup-status__copy">
                   {setupSavedToday
                     ? `Editing this form will update the setup for ${setupConfig.date ?? "today"}.`
-                    : "The bot will not have daily contract inputs until you save Contract 1 and Contract 2 for today."}
+                    : "The bot will not have daily contract inputs until you save at least Contract 1 for today."}
                 </p>
               </div>
               <span className="setup-status__pill">
@@ -2143,7 +2936,11 @@ export function App() {
                 }))
               }
             >
-              {editorOpen ? "Hide Update Section" : setupSavedToday ? "Edit Setup" : "Add Setup"}
+              {editorOpen
+                ? "Hide Update Section"
+                : setupSavedToday
+                  ? "Edit Setup"
+                  : "Add Setup"}
             </button>
           </div>
 
@@ -2152,137 +2949,210 @@ export function App() {
               className="backtest-form contract-form"
               onSubmit={(event) => saveStrategyContracts(event, strategyKey)}
             >
-            {showContracts ? (
-              <>
-                <label className="form-field">
-                  Contract 1
-                  <input
-                    type="text"
-                    value={setupForm.contract1}
-                    placeholder="24000PE"
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "contract1", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="form-field">
-                  Contract 2
-                  <input
-                    type="text"
-                    value={setupForm.contract2}
-                    placeholder="24100CE"
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "contract2", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="form-field">
-                  Entry Signal
-                  <input type="text" value="BUY only" readOnly />
-                </label>
-              </>
-            ) : null}
-            <label className="form-field">
-              Start Time
-              <input
-                type="time"
-                value={setupForm.scheduleStart}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "scheduleStart", event.target.value)
-                }
-              />
-            </label>
-            <label className="form-field">
-              End Time
-              <input
-                type="time"
-                value={setupForm.scheduleEnd}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "scheduleEnd", event.target.value)
-                }
-              />
-            </label>
-            <label className="form-field">
-              <span className="form-field__label-row">
-                Starting Balance
-                {showContracts ? (
-                  <button
-                    type="button"
-                    className="field-mini-button"
-                    onClick={() => fillStartingBalanceFromCash(strategyKey)}
-                  >
-                    Use balance left
-                  </button>
-                ) : null}
-              </span>
-              <input
-                type="number"
-                min="1"
-                value={setupForm.startingBalance}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "startingBalance", event.target.value)
-                }
-              />
-            </label>
-            <label className="form-field">
-              Target %
-              <input
-                type="number"
-                min="0.1"
-                step="0.1"
-                value={setupForm.targetPct}
-                onChange={(event) =>
-                  updateContractField(strategyKey, "targetPct", event.target.value)
-                }
-              />
-            </label>
-            {showContracts ? (
-              <>
-                <label className="form-field">
-                  Max Body %
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.1"
-                    value={setupForm.maxSignalCandlePct}
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "maxSignalCandlePct", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="form-field">
-                  SL Mode
-                  <select
-                    value={setupForm.stopLossMode}
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "stopLossMode", event.target.value)
-                    }
-                  >
-                    <option value="signal_low">Signal Low</option>
-                    <option value="percent">Fixed %</option>
-                  </select>
-                </label>
-                <label className="form-field">
-                  SL %
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.1"
-                    value={setupForm.stopLossPct}
-                    onChange={(event) =>
-                      updateContractField(strategyKey, "stopLossPct", event.target.value)
-                    }
-                  />
-                </label>
-              </>
-            ) : null}
-            <button
-              type="submit"
-              className="action-button"
-              disabled={contractSaving}
-            >
-              {contractSaving ? "Saving..." : setupSavedToday ? "Update Setup" : "Save Setup"}
-            </button>
+              {showContracts ? (
+                <>
+                  <label className="form-field">
+                    Contract 1 side
+                    <input
+                      type="text"
+                      value={setupForm.contract1}
+                      placeholder={contractPlaceholder1}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "contract1",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    Contract 2 side (optional)
+                    <input
+                      type="text"
+                      value={setupForm.contract2}
+                      placeholder={contractPlaceholder2}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "contract2",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    Entry Signal
+                    <select
+                      value={setupForm.entrySignal}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "entrySignal",
+                          event.target.value,
+                        )
+                      }
+                    >
+                      <option value="BUY">BUY</option>
+                      <option value="SELL">SELL</option>
+                      <option value="BOTH">Both</option>
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              <label className="form-field">
+                Start Time
+                <input
+                  type="time"
+                  value={setupForm.scheduleStart}
+                  onChange={(event) =>
+                    updateContractField(
+                      strategyKey,
+                      "scheduleStart",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                End Time
+                <input
+                  type="time"
+                  value={setupForm.scheduleEnd}
+                  onChange={(event) =>
+                    updateContractField(
+                      strategyKey,
+                      "scheduleEnd",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                <span className="form-field__label-row">
+                  Starting Balance
+                  {showContracts ? (
+                    <button
+                      type="button"
+                      className="field-mini-button"
+                      onClick={() => fillStartingBalanceFromCash(strategyKey)}
+                    >
+                      Use balance left
+                    </button>
+                  ) : null}
+                </span>
+                <input
+                  type="number"
+                  min="1"
+                  value={setupForm.startingBalance}
+                  onChange={(event) =>
+                    updateContractField(
+                      strategyKey,
+                      "startingBalance",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Target %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={setupForm.targetPct}
+                  onChange={(event) =>
+                    updateContractField(
+                      strategyKey,
+                      "targetPct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              {showContracts ? (
+                <>
+                  <label className="form-field">
+                    Max Body %
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={setupForm.maxSignalCandlePct}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "maxSignalCandlePct",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    Strike Offset
+                    <input
+                      type="number"
+                      step={
+                        strategyKey === DAILY_SETUP_KEYS.sensexOneMinuteBot
+                          ? "100"
+                          : "50"
+                      }
+                      value={setupForm.strikeOffset}
+                      placeholder="0, 100, -100"
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "strikeOffset",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    SL Mode
+                    <select
+                      value={setupForm.stopLossMode}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "stopLossMode",
+                          event.target.value,
+                        )
+                      }
+                    >
+                      <option value="signal_low">Signal Low</option>
+                      <option value="percent">Fixed %</option>
+                    </select>
+                  </label>
+                  <label className="form-field">
+                    SL %
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={setupForm.stopLossPct}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "stopLossPct",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </>
+              ) : null}
+              <button
+                type="submit"
+                className="action-button"
+                disabled={contractSaving}
+              >
+                {contractSaving
+                  ? "Saving..."
+                  : setupSavedToday
+                    ? "Update Setup"
+                    : "Save Setup"}
+              </button>
             </form>
           ) : null}
 
@@ -2298,7 +3168,11 @@ export function App() {
             {showContracts ? (
               <div>
                 <dt>Last Saved</dt>
-                <dd>{setupSavedAt ? formatDateTime(setupSavedAt) : "Not set today"}</dd>
+                <dd>
+                  {setupSavedAt
+                    ? formatDateTime(setupSavedAt)
+                    : "Not set today"}
+                </dd>
               </div>
             ) : null}
             {showContracts ? (
@@ -2313,7 +3187,9 @@ export function App() {
                 <dd>
                   {setupConfig.targetPct ?? "-"}% /{" "}
                   {formatSnakeLabel(setupConfig.stopLossMode ?? "not_set")}
-                  {setupConfig.stopLossMode === "percent" ? ` ${setupConfig.stopLossPct ?? "-"}%` : ""}
+                  {setupConfig.stopLossMode === "percent"
+                    ? ` ${setupConfig.stopLossPct ?? "-"}%`
+                    : ""}
                 </dd>
               </div>
             ) : null}
@@ -2323,6 +3199,12 @@ export function App() {
                 <dd>{setupConfig.maxSignalCandlePct ?? "-"}%</dd>
               </div>
             ) : null}
+            {showContracts ? (
+              <div>
+                <dt>Strike Offset</dt>
+                <dd>{setupConfig.strikeOffset ?? 0}</dd>
+              </div>
+            ) : null}
             <div>
               <dt>Starting Balance</dt>
               <dd>{formatCurrency(setupConfig.startingBalance)}</dd>
@@ -2330,12 +3212,13 @@ export function App() {
             <div>
               <dt>Window</dt>
               <dd>
-                {setupConfig.scheduleStart ?? "-"} - {setupConfig.scheduleEnd ?? "-"}
+                {setupConfig.scheduleStart ?? "-"} -{" "}
+                {setupConfig.scheduleEnd ?? "-"}
               </dd>
             </div>
             {showContracts ? (
               <div>
-                <dt>Contracts</dt>
+                <dt>Option Sides</dt>
                 <dd>
                   {setupConfig.effectiveContracts?.contract1 || "-"} /{" "}
                   {setupConfig.effectiveContracts?.contract2 || "-"}
@@ -2344,155 +3227,6 @@ export function App() {
             ) : null}
           </dl>
         </section>
-
-        <section className="content-grid">
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">Current Active Trade</p>
-                <p className="panel-subtitle">
-                  Active trade state for this bot only.
-                </p>
-              </div>
-            </div>
-            {firstActiveTrade ? (
-              <dl className="status-list">
-                <div>
-                  <dt>Contract</dt>
-                  <dd>{firstActiveTrade.option_symbol ?? "Not available"}</dd>
-                </div>
-                <div>
-                  <dt>Signal</dt>
-                  <dd>{formatSignal(firstActiveTrade.signal)}</dd>
-                </div>
-                <div>
-                  <dt>Entry Time</dt>
-                  <dd>{formatDateTime(firstActiveTrade.entry_time)}</dd>
-                </div>
-                <div>
-                  <dt>Entry</dt>
-                  <dd>{formatCurrency(firstActiveTrade.entry_price)}</dd>
-                </div>
-                <div>
-                  <dt>Live</dt>
-                  <dd>{formatCurrency(firstActiveTrade.livePrice)}</dd>
-                </div>
-                <div>
-                  <dt>Unrealized</dt>
-                  <dd>
-                    <PnlValue
-                      value={firstActiveTrade.unrealizedPnl}
-                      baseValue={firstActiveTrade.capital_used}
-                    />
-                  </dd>
-                </div>
-                <div>
-                  <dt>SL</dt>
-                  <dd>{formatCurrency(firstActiveTrade.stop_loss_price)}</dd>
-                </div>
-                <div>
-                  <dt>Target</dt>
-                  <dd>{formatCurrency(firstActiveTrade.target_price)}</dd>
-                </div>
-              </dl>
-            ) : (
-              <div className="trade-empty-state" aria-label="No active trade">
-                <div className="trade-empty-state__icon" aria-hidden="true">
-                  <span className="trade-empty-state__dot" />
-                  <span className="trade-empty-state__dot" />
-                  <span className="trade-empty-state__dot" />
-                </div>
-              </div>
-            )}
-          </article>
-
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">Bot Summary</p>
-                <p className="panel-subtitle">
-                  Filtered performance for the selected range.
-                </p>
-              </div>
-            </div>
-            <dl className="status-list">
-              <div>
-                <dt>Trades</dt>
-                <dd>{formatCount(summary.tradeCount)}</dd>
-              </div>
-              <div>
-                <dt>Wins / Losses</dt>
-                <dd>
-                  {formatCount(summary.winCount)} / {formatCount(summary.lossCount)}
-                </dd>
-              </div>
-              <div>
-                <dt>Active Trades</dt>
-                <dd>{formatCount(currentActiveTrades.length)}</dd>
-              </div>
-              <div>
-                <dt>Strategy Mode</dt>
-                <dd>{showContracts ? "Option contracts" : "Index signal"}</dd>
-              </div>
-            </dl>
-          </article>
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-title">Trade History</p>
-              <p className="panel-subtitle">
-                Completed trades generated by this bot.
-              </p>
-            </div>
-          </div>
-          {trades.length ? (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Signal</th>
-                    <th>Contract</th>
-                    <th>Entry</th>
-                    <th>Exit</th>
-                    <th>Entry Price</th>
-                    <th>Exit Price</th>
-                    <th>SL</th>
-                    <th>Target</th>
-                    <th>Net PnL</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.map((trade) => (
-                    <tr key={trade.trade_id}>
-                      <td>{formatSignal(trade.signal)}</td>
-                      <td>{trade.option_symbol ?? "Not available"}</td>
-                      <td>{formatTableDateTime(trade.entry_time)}</td>
-                      <td>{formatTableDateTime(trade.exit_time)}</td>
-                      <td>{formatCurrency(trade.entry_price)}</td>
-                      <td>{formatCurrency(trade.exit_price)}</td>
-                      <td>{formatCurrency(trade.stop_loss_price)}</td>
-                      <td>{formatCurrency(trade.target_price)}</td>
-                      <td>
-                        <PnlValue
-                          value={trade.net_pnl}
-                          baseValue={trade.capital_used}
-                        />
-                      </td>
-                      <td>{trade.status ?? "Closed"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="empty-copy">
-              Completed trades for this bot will appear here after the first exit.
-            </p>
-          )}
-        </section>
       </section>
     );
   }
@@ -2500,122 +3234,123 @@ export function App() {
   return (
     <main className="shell">
       <section className="top-nav">
-        <div className="brand-mark" aria-label="NIFTY Signal Dashboard">
+        <div className="brand-mark" aria-label="Tradewise">
           <img src="/app-icon.svg" alt="" />
-          <span>NIFTY Bot</span>
+          <span>Tradewise</span>
         </div>
-        <div className="nav-group">
-          {NAV_OPTIONS.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className={`nav-chip ${activeView === option.id ? "nav-chip--active" : ""}`}
-              onClick={() => changeActiveView(option.id)}
-            >
-              {option.label}
-            </button>
-          ))}
+        <div className="top-clock" aria-label="Current IST time">
+          <span className="top-clock__date">
+            {formatIstClockDate(clockNow)}
+          </span>
+          <span className="top-clock__divider" aria-hidden="true" />
+          <span className="top-clock__time">{formatIstClock(clockNow)}</span>
         </div>
-
-        <div className="mobile-nav-select-wrap">
+        <div className="profile-menu-wrap">
           <button
             type="button"
-            className="mobile-nav-trigger"
+            className="profile-menu-trigger"
             aria-haspopup="listbox"
             aria-expanded={mobileMenuOpen}
             onClick={() => setMobileMenuOpen((isOpen) => !isOpen)}
           >
-            <span className="mobile-nav-trigger__meta">Section</span>
-            <span className="mobile-nav-trigger__label">{activeNavOption.label}</span>
-            <span className="mobile-nav-trigger__chevron" aria-hidden="true">⌄</span>
+            <span className="profile-menu-trigger__avatar" aria-hidden="true">
+              T
+            </span>
+            <span className="profile-menu-trigger__text">
+              <span className="profile-menu-trigger__meta">Menu</span>
+              <span className="profile-menu-trigger__label">
+                {activeNavOption.label}
+              </span>
+            </span>
+            <span className="profile-menu-trigger__chevron" aria-hidden="true">
+              ⌄
+            </span>
           </button>
           {mobileMenuOpen ? (
-            <div className="mobile-nav-menu" role="listbox" aria-label="Dashboard section">
+            <div
+              className="profile-menu-pane"
+              role="listbox"
+              aria-label="Dashboard section"
+            >
               {NAV_OPTIONS.map((option) => (
                 <button
                   key={option.id}
                   type="button"
                   role="option"
                   aria-selected={activeView === option.id}
-                  className={`mobile-nav-option ${activeView === option.id ? "mobile-nav-option--active" : ""}`}
+                  className={`profile-menu-option ${activeView === option.id ? "profile-menu-option--active" : ""}`}
                   onClick={() => changeActiveView(option.id)}
                 >
                   {option.label}
                 </button>
               ))}
+              <div className="profile-theme-switcher" aria-label="Theme">
+                {THEME_OPTIONS.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`profile-theme-chip ${
+                      theme === option.id ? "profile-theme-chip--active" : ""
+                    }`}
+                    onClick={() => setTheme(option.id)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
           ) : null}
         </div>
-
-        <button type="button" className="theme-toggle" onClick={toggleTheme}>
-          {theme === "dark" ? "Light Mode" : "Dark Mode"}
-        </button>
       </section>
 
       <section className="hero">
         <div>
-          <p className="eyebrow">NIFTY Signal Control Room</p>
-          <h1>Live NIFTY paper trading and signal dashboard.</h1>
-          <p className="hero-copy">
-            {activeView === "overview"
-              ? "A compact daily view for market quotes, selected contracts, active trade state, and PnL."
-              : activeView === "oneMinuteBot"
-                ? "Dedicated view for the 1-minute two-contract option bot, including its own active trade and PnL."
-              : activeView === "trades"
-                ? "Review completed paper trades with entry, exit, risk, and net PnL details."
-                : activeView === "signals"
-                  ? "Inspect live signal alerts and trigger sample alerts when you need to test delivery."
-              : activeView === "reports"
-                ? "Review hourly paper-trade performance with win/loss distribution and optional PnL overlays."
-                  : activeView === "broker"
-                    ? "Manage Zerodha connection state and confirm the live data bridge is ready."
-                    : activeView === "liveTrading"
-                      ? "Turn live trading on or off, place guarded orders, and track Zerodha order state."
-                    : activeView === "optionBacktest"
-                        ? "Backtest Supertrend directly on a manual option contract using Zerodha option candles."
-                        : "Inspect every bot run with Supertrend values, signal state, and per-run messages, filtered date by date."}
-          </p>
+          <p className="eyebrow">Workspace</p>
+          <h1>{activeNavOption.label}</h1>
         </div>
         <div className="hero-badge">
           <span>
             {activeView === "overview"
               ? "Feed"
-              : activeView === "oneMinuteBot"
+              : activeView === "niftyOneMinuteBot" ||
+                  activeView === "sensexOneMinuteBot"
                 ? "Bot"
-              : activeView === "trades"
-                ? "History"
-                : activeView === "signals"
-                  ? "Alerts"
-              : activeView === "reports"
-                ? "Report range"
-                : activeView === "broker"
-                  ? "Zerodha"
-                  : activeView === "liveTrading"
-                    ? "Live"
-                  : "Selected date"}
+                : activeView === "trades"
+                  ? "History"
+                  : activeView === "signals"
+                    ? "Alerts"
+                    : activeView === "reports"
+                      ? "Report range"
+                      : activeView === "broker"
+                        ? "Zerodha"
+                        : activeView === "liveTrading"
+                          ? "Live"
+                          : "Selected date"}
           </span>
           <strong>
             {activeView === "overview"
               ? streamStatus
-              : activeView === "oneMinuteBot"
-                ? "1m options"
-              : activeView === "trades"
-                ? `${formatCount(tradeHistory.length)} trades`
-                : activeView === "signals"
-                  ? `${formatCount(recentAlerts.length)} alerts`
-              : activeView === "reports"
-                ? selectedRangeMeta.label
-                : activeView === "broker"
-                  ? zerodha.health?.ok
-                    ? "Working"
-                    : "Check needed"
-                  : activeView === "liveTrading"
-                    ? liveTradingStatus.enabled
-                      ? "Enabled"
-                      : "Disabled"
-                  : activeView === "optionBacktest"
-                      ? "Manual contract"
-                      : selectedDate}
+              : activeView === "niftyOneMinuteBot"
+                ? "NIFTY 1m"
+                : activeView === "sensexOneMinuteBot"
+                  ? "SENSEX 1m"
+                  : activeView === "trades"
+                    ? `${formatCount(tradeHistory.length)} trades`
+                    : activeView === "signals"
+                      ? `${formatCount(recentAlerts.length)} alerts`
+                      : activeView === "reports"
+                        ? selectedRangeMeta.label
+                        : activeView === "broker"
+                          ? zerodha.health?.ok
+                            ? "Working"
+                            : "Check needed"
+                          : activeView === "liveTrading"
+                            ? liveTradingStatus.enabled
+                              ? "Enabled"
+                              : "Disabled"
+                            : activeView === "optionBacktest"
+                              ? "Manual contract"
+                              : selectedDate}
           </strong>
         </div>
       </section>
@@ -2625,6 +3360,223 @@ export function App() {
         <div className="banner banner--success">{actionMessage}</div>
       ) : null}
       {loading ? <div className="banner">Loading dashboard data...</div> : null}
+      {zerodhaConfirmOpen ? (
+        <div className="confirm-overlay" role="presentation">
+          <section
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="zerodha-confirm-title"
+          >
+            <div className="confirm-dialog__icon" aria-hidden="true">
+              Z
+            </div>
+            <div>
+              <p className="eyebrow">Broker Login</p>
+              <h2 id="zerodha-confirm-title">Connect Zerodha?</h2>
+              <p className="confirm-dialog__copy">
+                You’ll leave Tradewise and open Zerodha Kite login. After login,
+                Zerodha will redirect you back to the configured callback URL.
+              </p>
+            </div>
+            <dl className="confirm-dialog__details">
+              <div>
+                <dt>API Key</dt>
+                <dd>{zerodha.apiKeyConfigured ? "Configured" : "Missing"}</dd>
+              </div>
+              <div>
+                <dt>Redirect URL</dt>
+                <dd>{zerodha.redirectUrl ?? "Not available"}</dd>
+              </div>
+            </dl>
+            <div className="confirm-dialog__actions">
+              <button
+                type="button"
+                className="action-button action-button--ghost"
+                onClick={() => setZerodhaConfirmOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="action-button action-button--buy"
+                onClick={confirmZerodhaConnect}
+                disabled={zerodhaAuthBusy}
+              >
+                {zerodhaAuthBusy ? "Opening..." : "Continue to Zerodha"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {deleteTradeCandidate ? (
+        <div className="confirm-overlay" role="presentation">
+          <section
+            className="confirm-dialog confirm-dialog--danger"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-trade-confirm-title"
+          >
+            <div
+              className="confirm-dialog__icon confirm-dialog__icon--danger"
+              aria-hidden="true"
+            >
+              !
+            </div>
+            <div>
+              <p className="eyebrow">Delete Trade</p>
+              <h2 id="delete-trade-confirm-title">Remove this trade?</h2>
+            </div>
+            <dl className="confirm-dialog__details">
+              <div>
+                <dt>Contract</dt>
+                <dd>{deleteTradeCandidate.option_symbol ?? "Not available"}</dd>
+              </div>
+              <div>
+                <dt>Net PnL</dt>
+                <dd>
+                  <PnlValue
+                    value={deleteTradeCandidate.net_pnl}
+                    baseValue={deleteTradeCandidate.capital_used}
+                  />
+                </dd>
+              </div>
+            </dl>
+            <div className="confirm-dialog__actions">
+              <button
+                type="button"
+                className="action-button action-button--ghost"
+                onClick={() => setDeleteTradeCandidate(null)}
+                disabled={deletingTradeId === deleteTradeCandidate.trade_id}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="action-button action-button--sell"
+                onClick={() => deleteTrade(deleteTradeCandidate.trade_id)}
+                disabled={deletingTradeId === deleteTradeCandidate.trade_id}
+              >
+                {deletingTradeId === deleteTradeCandidate.trade_id
+                  ? "Deleting..."
+                  : "Delete Trade"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {liveTradingConfirmOpen ? (
+        <div className="confirm-overlay" role="presentation">
+          <section
+            className="confirm-dialog confirm-dialog--live"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="live-trading-confirm-title"
+          >
+            <div
+              className="confirm-dialog__icon confirm-dialog__icon--live"
+              aria-hidden="true"
+            >
+              L
+            </div>
+            <div>
+              <p className="eyebrow">Live Trading</p>
+              <h2 id="live-trading-confirm-title">Turn on live orders?</h2>
+              <p className="confirm-dialog__copy">
+                Please confirm the selected setup before Tradewise can place
+                real Zerodha orders for this strategy.
+              </p>
+            </div>
+            <dl className="confirm-dialog__details">
+              <div>
+                <dt>Market</dt>
+                <dd>{liveSetupMarket}</dd>
+              </div>
+              <div>
+                <dt>Option Side</dt>
+                <dd>
+                  {liveSelectedSide === "BOTH" ? "PE / CE" : liveSelectedSide}
+                </dd>
+              </div>
+              <div>
+                <dt>Contracts</dt>
+                <dd>{liveSelectedContracts || "Not set"}</dd>
+              </div>
+              <div>
+                <dt>Window</dt>
+                <dd>
+                  {liveSelectedForm.scheduleStart || "-"} to{" "}
+                  {liveSelectedForm.scheduleEnd || "-"}
+                </dd>
+              </div>
+              <div>
+                <dt>Entry Signal</dt>
+                <dd>{liveSelectedForm.entrySignal || "BUY"}</dd>
+              </div>
+              <div>
+                <dt>Target / SL</dt>
+                <dd>
+                  {liveSelectedForm.targetPct || "-"}% /{" "}
+                  {formatSnakeLabel(
+                    liveSelectedForm.stopLossMode || "signal_low",
+                  )}
+                  {liveSelectedForm.stopLossMode === "percent"
+                    ? ` ${liveSelectedForm.stopLossPct || "-"}%`
+                    : ""}
+                </dd>
+              </div>
+              <div>
+                <dt>Max Body</dt>
+                <dd>{liveSelectedForm.maxSignalCandlePct || "-"}%</dd>
+              </div>
+              <div>
+                <dt>Offset</dt>
+                <dd>{liveSelectedForm.strikeOffset || "0"}</dd>
+              </div>
+              <div>
+                <dt>Broker Cash</dt>
+                <dd>
+                  {liveBalance.cash == null
+                    ? "Not available"
+                    : formatCurrency(liveBalance.cash)}
+                </dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd>
+                  {liveTradingStatus.zerodhaReady
+                    ? "Zerodha ready"
+                    : "Zerodha not ready"}{" "}
+                  ·{" "}
+                  {liveSelectedSetup.usesDailySetup
+                    ? "Setup saved"
+                    : "Setup not saved"}
+                </dd>
+              </div>
+            </dl>
+            <div className="confirm-dialog__actions">
+              <button
+                type="button"
+                className="action-button action-button--ghost"
+                onClick={() => setLiveTradingConfirmOpen(false)}
+                disabled={liveActionBusy === "toggle"}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="action-button action-button--buy"
+                onClick={() => toggleLiveTrading(true)}
+                disabled={liveActionBusy === "toggle"}
+              >
+                {liveActionBusy === "toggle"
+                  ? "Turning on..."
+                  : "Confirm & Turn On"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {activeView === "overview" ? (
         <>
@@ -2651,409 +3603,627 @@ export function App() {
               ))}
             </div>
 
-            <section className="metrics-grid market-overview-grid">
-              {marketQuotes.map((quote) => (
-                <MarketQuoteCard key={quote.name} quote={quote} />
-              ))}
-              <MetricCard
-                label="Last Run Status"
-                value={status.lastRunStatus ?? "idle"}
-                tone={getStatusTone(status.lastRunStatus)}
-              />
-              <MetricCard
-                label="Next Run (IST)"
-                value={formatDateTime(schedule.nextRunAt)}
-              />
-              <MetricCard
-                label="Running PnL"
-                value={
-                  <PnlValue
-                    value={selectedRangeSummary.runningPnl ?? 0}
-                    baseValue={paperTrading.capitalBase}
-                  />
-                }
-                tone={getPnlTone(selectedRangeSummary.runningPnl ?? 0)}
-              />
-              <MetricCard
-                label={selectedRangeMeta.tradesLabel}
-                value={formatCount(selectedRangeSummary.tradeCount)}
-              />
-              <MetricCard label="Wins / Losses" value={winsLosses} />
-              <MetricCard
-                label="Open Trade"
-                value={openTradeLabel}
-                tone={activeTrade ? "warn" : "neutral"}
-              />
+            <section className="market-overview-layout">
+              <div className="market-quote-grid">
+                {marketQuotes.map((quote) => (
+                  <MarketQuoteCard key={quote.name} quote={quote} />
+                ))}
+              </div>
+
+              <article className="panel bot-command-card overview-summary-card">
+                <div className="bot-command-card__top">
+                  <div>
+                    <p className="eyebrow">Overview Summary</p>
+                    <h2>{selectedRangeMeta.label}</h2>
+                    <p className="bot-command-card__subtitle">
+                      Latest bot status and combined NIFTY/SENSEX paper result.
+                    </p>
+                  </div>
+                  <span
+                    className={`status-pill status-pill--${getStatusTone(status.lastRunStatus)}`}
+                  >
+                    {status.lastRunStatus ?? "idle"}
+                  </span>
+                </div>
+
+                <div className="bot-command-card__main overview-summary-card__main">
+                  <div className="bot-command-card__pnl">
+                    <span>Running PnL</span>
+                    <strong>
+                      <PnlValue
+                        value={selectedRangeSummary.runningPnl ?? 0}
+                        baseValue={combinedCapitalBase}
+                      />
+                    </strong>
+                    <small>
+                      {formatCount(selectedRangeSummary.tradeCount)} trades ·{" "}
+                      {winsLosses} W/L
+                    </small>
+                  </div>
+                  <dl className="bot-command-card__stats overview-summary-card__stats">
+                    <div>
+                      <dt>Next Run</dt>
+                      <dd>{formatDateTime(schedule.nextRunAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>{selectedRangeMeta.tradesLabel}</dt>
+                      <dd>{formatCount(selectedRangeSummary.tradeCount)}</dd>
+                    </div>
+                    <div>
+                      <dt>Wins / Losses</dt>
+                      <dd>{winsLosses}</dd>
+                    </div>
+                    <div>
+                      <dt>Open Trade</dt>
+                      <dd>{openTradeLabel}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </article>
             </section>
           </section>
 
           <section id="paper-trading" className="section-block">
             <div className="section-heading">
               <p className="eyebrow">Paper Trading</p>
-              <h2 className="section-title">Position and performance</h2>
+              <h2 className="section-title">NIFTY and SENSEX bots</h2>
             </div>
 
-            <section className="content-grid">
-              <article className="panel">
-                <div className="panel-header">
-                  <div>
-                    <p className="panel-title">Current Active Trade</p>
-                    <p className="panel-subtitle">
-                      Live paper position state restored across restarts.
-                    </p>
-                  </div>
-                </div>
-
-                {activeTrade ? (
-                  <dl className="status-list">
-                    <div>
-                      <dt>Contract</dt>
-                      <dd>{activeTrade.option_symbol ?? "Not available"}</dd>
-                    </div>
-                    <div>
-                      <dt>Signal</dt>
-                      <dd>{formatSignal(activeTrade.signal)}</dd>
-                    </div>
-                    <div>
-                      <dt>Entry Time</dt>
-                      <dd>{formatDateTime(activeTrade.entry_time)}</dd>
-                    </div>
-                    <div>
-                      <dt>Quantity</dt>
-                      <dd>{activeTrade.quantity ?? "Not available"}</dd>
-                    </div>
-                    <div>
-                      <dt>Capital Used</dt>
-                      <dd>{formatCurrency(activeTrade.capital_used)}</dd>
-                    </div>
-                    <div>
-                      <dt>Entry Price</dt>
-                      <dd>{formatCurrency(activeTrade.entry_price)}</dd>
-                    </div>
-                    <div>
-                      <dt>Live Price</dt>
-                      <dd>{formatCurrency(activeTrade.livePrice)}</dd>
-                    </div>
-                    <div>
-                      <dt>Unrealized PnL</dt>
-                      <dd>
-                        <PnlValue
-                          value={activeTrade.unrealizedPnl}
-                          baseValue={activeTrade.capital_used}
-                        />
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>SL</dt>
-                      <dd>{formatCurrency(activeTrade.stop_loss_price)}</dd>
-                    </div>
-                    <div>
-                      <dt>SL Source</dt>
-                      <dd>
-                        {formatStopLossSource(activeTrade.stop_loss_source)}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Target</dt>
-                      <dd>{formatCurrency(activeTrade.target_price)}</dd>
-                    </div>
-                  </dl>
-                ) : (
-                  <div
-                    className="trade-empty-state"
-                    aria-label="No active trade"
-                  >
-                    <div className="trade-empty-state__icon" aria-hidden="true">
-                      <span className="trade-empty-state__dot" />
-                      <span className="trade-empty-state__dot" />
-                      <span className="trade-empty-state__dot" />
-                    </div>
-                  </div>
-                )}
-              </article>
-
-              <article className="panel">
-                <div className="panel-header">
-                  <div>
-                    <p className="panel-title">Daily Summary</p>
-                    <p className="panel-subtitle">
-                      Paper-trading performance snapshot for the current IST
-                      session.
-                    </p>
-                  </div>
-                </div>
-
-                <dl className="status-list">
-                  <div>
-                    <dt>Trade Date</dt>
-                    <dd>{dailySummary.tradeDate ?? "Not available"}</dd>
-                  </div>
-                  <div>
-                    <dt>Realized PnL</dt>
-                    <dd>
-                      <PnlValue
-                        value={paperTrading.realizedPnl ?? 0}
-                        baseValue={paperTrading.capitalBase}
+            <section className="overview-bot-tables">
+              {overviewBotCards.map((bot) => {
+                const botActiveTrade = bot.activeTrades[0] ?? null;
+                const botDailySummary = bot.paperTrading.dailySummary ?? {};
+                const side1 = bot.setup.effectiveContracts?.contract1 || "-";
+                const side2 = bot.setup.effectiveContracts?.contract2 || "-";
+                const nextExpiry =
+                  bot.setup.nextExpiry?.label ??
+                  bot.setup.nextExpiry?.date ??
+                  "Not available";
+                const activeTradeLabel = botActiveTrade ? (
+                  <span className="bot-active-trade-cell">
+                    {formatSignal(botActiveTrade.signal)}
+                    <strong>
+                      {formatCompactOptionSymbol(botActiveTrade.option_symbol)}
+                    </strong>
+                    <span>
+                      {formatCurrency(botActiveTrade.entry_price)} /{" "}
+                      {formatCurrency(botActiveTrade.livePrice)}
+                    </span>
+                    <PnlValue
+                      value={botActiveTrade.unrealizedPnl}
+                        baseValue={botActiveTrade.capital_used}
                       />
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Trades</dt>
-                    <dd>{formatCount(dailySummary.tradeCount)}</dd>
-                  </div>
-                  <div>
-                    <dt>Wins / Losses</dt>
-                    <dd>
-                      {formatCount(dailySummary.winCount)} /{" "}
-                      {formatCount(dailySummary.lossCount)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Day Stopped</dt>
-                    <dd>{dailySummary.dayStopped ? "Yes" : "No"}</dd>
-                  </div>
-                  <div>
-                    <dt>Stop Reason</dt>
-                    <dd>{dailySummary.dayStopReason ?? "Not triggered"}</dd>
-                  </div>
-                </dl>
-              </article>
+                    </span>
+                  ) : (
+                  <span className="muted-cell">No active trade</span>
+                );
+                return (
+                  <article
+                    className="panel bot-command-card overview-bot-command-card"
+                    key={bot.strategyKey}
+                  >
+                    <div className="bot-command-card__top">
+                      <div>
+                        <p className="eyebrow">1m Option Bot</p>
+                        <h2>{bot.label}</h2>
+                        <p className="bot-command-card__subtitle">
+                          {side1} / {side2} · Next expiry {nextExpiry}
+                        </p>
+                      </div>
+                      <span
+                        className={`status-pill status-pill--${botActiveTrade ? "warn" : "neutral"}`}
+                      >
+                        {botActiveTrade ? "Active" : "Idle"}
+                      </span>
+                    </div>
+
+                    <div className="bot-command-card__main">
+                      <div className="bot-command-card__pnl">
+                        <span>Running PnL</span>
+                        <strong>
+                          <PnlValue
+                            value={bot.summary.runningPnl}
+                            baseValue={bot.paperTrading.capitalBase}
+                          />
+                        </strong>
+                        <small>
+                          {formatCount(bot.summary.tradeCount)} trades ·{" "}
+                          {formatCount(bot.summary.winCount)} /{" "}
+                          {formatCount(bot.summary.lossCount)} W/L
+                        </small>
+                      </div>
+                      <dl className="bot-command-card__stats overview-bot-card__stats">
+                        <div>
+                          <dt>Cash Balance</dt>
+                          <dd>
+                            {formatCurrency(
+                              bot.paperTrading.cashBalance ??
+                                bot.paperTrading.capitalBase,
+                            )}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Realized PnL</dt>
+                          <dd>
+                              <PnlValue
+                                value={bot.summary.realizedPnl}
+                                baseValue={bot.paperTrading.capitalBase}
+                              />
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Trade Date</dt>
+                          <dd>{botDailySummary.tradeDate ?? "Not available"}</dd>
+                        </div>
+                        <div>
+                          <dt>Day Stopped</dt>
+                          <dd>{botDailySummary.dayStopped ? "Yes" : "No"}</dd>
+                        </div>
+                        <div className="overview-bot-trend-card">
+                          <dt>Latest Trend</dt>
+                          <dd>
+                            <span className="log-trend-card__row">
+                              <span>Fast</span>
+                              <TrendBadge value={bot.trendLog?.fastTrend} />
+                              <span>Slow</span>
+                              <TrendBadge value={bot.trendLog?.slowTrend} />
+                            </span>
+                            <span className="log-trend-card__contract">
+                              {bot.trendLog
+                                ? formatCompactOptionSymbol(bot.trendLog.contract)
+                                : "Not available"}
+                            </span>
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+
+                    <div className="bot-command-card__footer overview-bot-card__footer">
+                      <div className="bot-command-card__trade">
+                        <div className="bot-command-card__trade-line">
+                          <span className="empty-state-icon" aria-hidden="true">
+                            {bot.label === "NIFTY" ? "N" : "S"}
+                          </span>
+                          <strong>Active Trade</strong>
+                        </div>
+                        <span>{activeTradeLabel}</span>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
             </section>
           </section>
 
           {false ? (
-          <section id="system-history" className="section-block">
-            <div className="section-heading">
-              <p className="eyebrow">System</p>
-              <h2 className="section-title">Broker connection and history</h2>
-            </div>
+            <section id="system-history" className="section-block">
+              <div className="section-heading">
+                <p className="eyebrow">System</p>
+                <h2 className="section-title">Broker connection and history</h2>
+              </div>
 
-            <section className="content-grid">
-              <article className="panel">
+              <section className="content-grid">
+                <article className="panel">
+                  <div className="panel-header">
+                    <div>
+                      <p className="panel-title">Zerodha Connection</p>
+                    </div>
+                  </div>
+
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="action-button"
+                      onClick={connectZerodha}
+                      disabled={zerodhaAuthBusy || !zerodha.apiKeyConfigured}
+                    >
+                      {zerodhaAuthBusy ? "Connecting..." : "Connect Zerodha"}
+                    </button>
+                  </div>
+
+                  <dl className="status-list">
+                    <div>
+                      <dt>API Key</dt>
+                      <dd>
+                        {zerodha.apiKeyConfigured ? "Configured" : "Missing"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>API Secret</dt>
+                      <dd>
+                        {zerodha.apiSecretConfigured ? "Configured" : "Missing"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Access Token</dt>
+                      <dd>
+                        {zerodha.accessTokenConfigured
+                          ? "Configured"
+                          : "Missing"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Health Check</dt>
+                      <dd>
+                        {zerodha.health?.ok
+                          ? "Working"
+                          : (zerodha.health?.message ?? "Not checked")}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Redirect URL</dt>
+                      <dd>{zerodha.redirectUrl ?? "Not available"}</dd>
+                    </div>
+                    <div>
+                      <dt>Last Session Update</dt>
+                      <dd>{formatDateTime(zerodha.session?.updatedAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>Last User</dt>
+                      <dd>
+                        {zerodha.session?.userName ??
+                          zerodha.session?.userId ??
+                          "Not available"}
+                      </dd>
+                    </div>
+                  </dl>
+                </article>
+
+                <article className="panel">
+                  <div className="panel-header">
+                    <div>
+                      <p className="panel-title">Signal Alerts</p>
+                    </div>
+                    <ColumnPicker
+                      label="Signal Alerts"
+                      columns={signalAlertColumns}
+                      selected={selectedSignalAlertColumns}
+                      onToggle={(columnId) =>
+                        toggleColumn(
+                          columnId,
+                          selectedSignalAlertColumns,
+                          setSelectedSignalAlertColumns,
+                          signalAlertColumns,
+                        )
+                      }
+                      onReset={() =>
+                        setSelectedSignalAlertColumns(
+                          signalAlertColumns.map((column) => column.id),
+                        )
+                      }
+                    />
+                  </div>
+
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="action-button action-button--buy"
+                      onClick={() => triggerSampleAlert("BUY")}
+                      disabled={triggeringSignal !== ""}
+                    >
+                      {triggeringSignal === "BUY"
+                        ? "Sending BUY..."
+                        : "Send Sample BUY"}
+                    </button>
+                    <button
+                      type="button"
+                      className="action-button action-button--sell"
+                      onClick={() => triggerSampleAlert("SELL")}
+                      disabled={triggeringSignal !== ""}
+                    >
+                      {triggeringSignal === "SELL"
+                        ? "Sending SELL..."
+                        : "Send Sample SELL"}
+                    </button>
+                  </div>
+
+                  {recentAlerts.length ? (
+                    <>
+                      <div className="table-wrap">
+                        <table className="table-alerts table-auto-fit">
+                          <thead>
+                            <tr>
+                              {visibleSignalAlertColumns.map((column) => (
+                                <th key={column.id}>{column.label}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {overviewAlertsTable.rows.map((alert) => (
+                              <tr
+                                key={`${alert.alertTime}-${alert.signal}-${alert.close}`}
+                              >
+                                {visibleSignalAlertColumns.map((column) => {
+                                  if (column.id === "signal")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatSignal(alert.signal)}
+                                      </td>
+                                    );
+                                  if (column.id === "optionSymbol")
+                                    return (
+                                      <td key={column.id}>
+                                        {alert.optionSymbol ??
+                                          alert.symbol ??
+                                          "-"}
+                                      </td>
+                                    );
+                                  if (column.id === "close")
+                                    return (
+                                      <td key={column.id}>
+                                        {alert.close?.toFixed(2)}
+                                      </td>
+                                    );
+                                  if (column.id === "st_10_1")
+                                    return (
+                                      <td key={column.id}>
+                                        {alert.st_10_1?.toFixed(2)}
+                                      </td>
+                                    );
+                                  if (column.id === "st_10_3")
+                                    return (
+                                      <td key={column.id}>
+                                        {alert.st_10_3?.toFixed(2)}
+                                      </td>
+                                    );
+                                  if (column.id === "candleTime")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatTableDateTime(alert.candleTime)}
+                                      </td>
+                                    );
+                                  if (column.id === "alertTime")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatTableDateTime(alert.alertTime)}
+                                      </td>
+                                    );
+                                  return <td key={column.id}>-</td>;
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <PaginationControls
+                        {...overviewAlertsTable.pagination.controls}
+                      />
+                    </>
+                  ) : (
+                    <p className="empty-copy">
+                      Recent alerts will appear here once the bot sends or tests
+                      a signal.
+                    </p>
+                  )}
+                </article>
+              </section>
+
+              <section className="panel">
                 <div className="panel-header">
                   <div>
-                    <p className="panel-title">Zerodha Connection</p>
-                    <p className="panel-subtitle">
-                      Login flow for generating and saving the Kite access
-                      token.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="action-row">
-                  <button
-                    type="button"
-                    className="action-button"
-                    onClick={connectZerodha}
-                    disabled={zerodhaAuthBusy || !zerodha.apiKeyConfigured}
-                  >
-                    {zerodhaAuthBusy ? "Connecting..." : "Connect Zerodha"}
-                  </button>
-                </div>
-
-                <dl className="status-list">
-                  <div>
-                    <dt>API Key</dt>
-                    <dd>
-                      {zerodha.apiKeyConfigured ? "Configured" : "Missing"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>API Secret</dt>
-                    <dd>
-                      {zerodha.apiSecretConfigured ? "Configured" : "Missing"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Access Token</dt>
-                    <dd>
-                      {zerodha.accessTokenConfigured ? "Configured" : "Missing"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Health Check</dt>
-                    <dd>
-                      {zerodha.health?.ok
-                        ? "Working"
-                        : (zerodha.health?.message ?? "Not checked")}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Redirect URL</dt>
-                    <dd>{zerodha.redirectUrl ?? "Not available"}</dd>
-                  </div>
-                  <div>
-                    <dt>Last Session Update</dt>
-                    <dd>{formatDateTime(zerodha.session?.updatedAt)}</dd>
-                  </div>
-                  <div>
-                    <dt>Last User</dt>
-                    <dd>
-                      {zerodha.session?.userName ??
-                        zerodha.session?.userId ??
-                        "Not available"}
-                    </dd>
-                  </div>
-                </dl>
-              </article>
-
-              <article className="panel">
-                <div className="panel-header">
-                  <div>
-                    <p className="panel-title">Signal Alerts</p>
-                    <p className="panel-subtitle">
-                      Live alert history from the shared bot state. Sample
-                      alerts can be triggered here too.
-                    </p>
+                    <p className="panel-title">Trade History</p>
                   </div>
                   <ColumnPicker
-                    label="Signal Alerts"
-                    columns={signalAlertColumns}
-                    selected={selectedSignalAlertColumns}
+                    label="Trade History"
+                    columns={tradeHistoryColumns}
+                    selected={selectedTradeHistoryColumns}
                     onToggle={(columnId) =>
                       toggleColumn(
                         columnId,
-                        selectedSignalAlertColumns,
-                        setSelectedSignalAlertColumns,
-                        signalAlertColumns,
+                        selectedTradeHistoryColumns,
+                        setSelectedTradeHistoryColumns,
+                        tradeHistoryColumns,
                       )
                     }
                     onReset={() =>
-                      setSelectedSignalAlertColumns(
-                        signalAlertColumns.map((column) => column.id),
+                      setSelectedTradeHistoryColumns(
+                        tradeHistoryColumns.map((column) => column.id),
                       )
                     }
+                    direction="up"
                   />
                 </div>
 
-                <div className="action-row">
-                  <button
-                    type="button"
-                    className="action-button action-button--buy"
-                    onClick={() => triggerSampleAlert("BUY")}
-                    disabled={triggeringSignal !== ""}
-                  >
-                    {triggeringSignal === "BUY"
-                      ? "Sending BUY..."
-                      : "Send Sample BUY"}
-                  </button>
-                  <button
-                    type="button"
-                    className="action-button action-button--sell"
-                    onClick={() => triggerSampleAlert("SELL")}
-                    disabled={triggeringSignal !== ""}
-                  >
-                    {triggeringSignal === "SELL"
-                      ? "Sending SELL..."
-                      : "Send Sample SELL"}
-                  </button>
-                </div>
-
-                {recentAlerts.length ? (
-                  <div className="table-wrap">
-                    <table className="table-alerts table-auto-fit">
-                      <thead>
-                        <tr>
-                          {visibleSignalAlertColumns.map((column) => (
-                            <th key={column.id}>{column.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recentAlerts.map((alert) => (
-                          <tr
-                            key={`${alert.alertTime}-${alert.signal}-${alert.close}`}
-                          >
-                            {visibleSignalAlertColumns.map((column) => {
-                              if (column.id === "signal")
-                                return (
-                                  <td key={column.id}>
-                                    {formatSignal(alert.signal)}
-                                  </td>
-                                );
-                              if (column.id === "optionSymbol")
-                                return (
-                                  <td key={column.id}>
-                                    {alert.optionSymbol ?? alert.symbol ?? "-"}
-                                  </td>
-                                );
-                              if (column.id === "close")
-                                return (
-                                  <td key={column.id}>
-                                    {alert.close?.toFixed(2)}
-                                  </td>
-                                );
-                              if (column.id === "st_10_1")
-                                return (
-                                  <td key={column.id}>
-                                    {alert.st_10_1?.toFixed(2)}
-                                  </td>
-                                );
-                              if (column.id === "st_10_3")
-                                return (
-                                  <td key={column.id}>
-                                    {alert.st_10_3?.toFixed(2)}
-                                  </td>
-                                );
-                              if (column.id === "candleTime")
-                                return (
-                                  <td key={column.id}>
-                                    {formatTableDateTime(alert.candleTime)}
-                                  </td>
-                                );
-                              if (column.id === "alertTime")
-                                return (
-                                  <td key={column.id}>
-                                    {formatTableDateTime(alert.alertTime)}
-                                  </td>
-                                );
-                              return <td key={column.id}>-</td>;
-                            })}
+                {tradeHistory.length ? (
+                  <>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            {visibleTradeHistoryColumns.map((column) => (
+                              <th key={column.id}>{column.label}</th>
+                            ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody>
+                          {overviewTradeHistoryTable.rows.map((trade) => (
+                            <tr key={trade.trade_id}>
+                              {visibleTradeHistoryColumns.map((column) => {
+                                if (column.id === "signal")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatSignal(trade.signal)}
+                                    </td>
+                                  );
+                                if (column.id === "option_symbol")
+                                  return (
+                                    <td key={column.id}>
+                                      {trade.option_symbol ?? "Not available"}
+                                    </td>
+                                  );
+                                if (column.id === "entry_time")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatTableDateTime(trade.entry_time)}
+                                    </td>
+                                  );
+                                if (column.id === "exit_time")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatTableDateTime(trade.exit_time)}
+                                    </td>
+                                  );
+                                if (column.id === "quantity")
+                                  return (
+                                    <td key={column.id}>
+                                      {trade.quantity ?? "-"}
+                                    </td>
+                                  );
+                                if (column.id === "capital_used")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.capital_used)}
+                                    </td>
+                                  );
+                                if (column.id === "entry_price")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.entry_price)}
+                                    </td>
+                                  );
+                                if (column.id === "exit_price")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.exit_price)}
+                                    </td>
+                                  );
+                                if (column.id === "stop_loss_price")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.stop_loss_price)}
+                                    </td>
+                                  );
+                                if (column.id === "stop_loss_source")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatStopLossSource(
+                                        trade.stop_loss_source,
+                                      )}
+                                    </td>
+                                  );
+                                if (column.id === "target_price")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.target_price)}
+                                    </td>
+                                  );
+                                if (column.id === "net_pnl")
+                                  return (
+                                    <td key={column.id}>
+                                      <PnlValue
+                                        value={trade.net_pnl}
+                                        baseValue={trade.capital_used}
+                                      />
+                                    </td>
+                                  );
+                                if (column.id === "status")
+                                  return (
+                                    <td key={column.id}>
+                                      {trade.status ?? "Closed"}
+                                    </td>
+                                  );
+                                return <td key={column.id}>-</td>;
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <PaginationControls
+                      {...overviewTradeHistoryTable.pagination.controls}
+                    />
+                  </>
                 ) : (
                   <p className="empty-copy">
-                    Recent alerts will appear here once the bot sends or tests a
-                    signal.
+                    Completed paper trades will appear here after the first
+                    exit.
                   </p>
                 )}
-              </article>
+              </section>
             </section>
+          ) : null}
+        </>
+      ) : activeView === "niftyOneMinuteBot" ? (
+        renderBotPage({
+          eyebrow: "NIFTY 1-Minute Option Bot",
+          title: "NIFTY 1m option-contract execution",
+          subtitle:
+            "Focused view for the NIFTY two-contract option strategy running on 1-minute candles.",
+          scheduleLabel: "Every 1 min at +2s",
+          strategyKey: DAILY_SETUP_KEYS.niftyOneMinuteBot,
+          trades: oneMinuteOptionTrades,
+          currentActiveTrades: oneMinuteActiveTrades,
+          summary: oneMinuteBotSummary,
+          showContracts: true,
+          botPaperTrading: niftyPaperTrading,
+        })
+      ) : activeView === "sensexOneMinuteBot" ? (
+        renderBotPage({
+          eyebrow: "SENSEX 1-Minute Option Bot",
+          title: "SENSEX 1m option-contract execution",
+          subtitle:
+            "Separate SENSEX paper-trading lane using the same two-contract 1-minute Supertrend strategy.",
+          scheduleLabel: "Every 1 min at +2s",
+          strategyKey: DAILY_SETUP_KEYS.sensexOneMinuteBot,
+          trades: sensexOneMinuteOptionTrades,
+          currentActiveTrades: sensexOneMinuteActiveTrades,
+          summary: sensexOneMinuteBotSummary,
+          showContracts: true,
+          botPaperTrading: sensexPaperTrading,
+        })
+      ) : activeView === "trades" ? (
+        <section className="section-block">
+          <div className="section-heading">
+            <p className="eyebrow">Paper Trading</p>
+            <h2 className="section-title">Trade history</h2>
+          </div>
 
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <p className="panel-title">Trade History</p>
-                  <p className="panel-subtitle">
-                    Completed paper trades with entry, exit, capital, and net
-                    PnL.
-                  </p>
-                </div>
-                <ColumnPicker
-                  label="Trade History"
-                  columns={tradeHistoryColumns}
-                  selected={selectedTradeHistoryColumns}
-                  onToggle={(columnId) =>
-                    toggleColumn(
-                      columnId,
-                      selectedTradeHistoryColumns,
-                      setSelectedTradeHistoryColumns,
-                      tradeHistoryColumns,
-                    )
-                  }
-                  onReset={() =>
-                    setSelectedTradeHistoryColumns(
-                      tradeHistoryColumns.map((column) => column.id),
-                    )
-                  }
-                  direction="up"
-                />
+          <div
+            className="range-switcher"
+            role="tablist"
+            aria-label="Trade history strategy filter"
+          >
+            {STRATEGY_FILTER_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={`range-chip ${tradeStrategyFilter === option.id ? "range-chip--active" : ""}`}
+                onClick={() => setTradeStrategyFilter(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-title">
+                  Completed Trades · {selectedTradeFilterMeta.label}
+                </p>
               </div>
+              <ColumnPicker
+                label="Trade History"
+                columns={tradeHistoryColumns}
+                selected={selectedTradeHistoryColumns}
+                onToggle={(columnId) =>
+                  toggleColumn(
+                    columnId,
+                    selectedTradeHistoryColumns,
+                    setSelectedTradeHistoryColumns,
+                    tradeHistoryColumns,
+                  )
+                }
+                onReset={() =>
+                  setSelectedTradeHistoryColumns(
+                    tradeHistoryColumns.map((column) => column.id),
+                  )
+                }
+              />
+            </div>
 
-              {tradeHistory.length ? (
+            {filteredTradeHistory.length ? (
+              <>
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -3064,7 +4234,7 @@ export function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {tradeHistory.map((trade) => (
+                      {tradeHistoryTable.rows.map((trade) => (
                         <tr key={trade.trade_id}>
                           {visibleTradeHistoryColumns.map((column) => {
                             if (column.id === "signal")
@@ -3146,6 +4316,25 @@ export function App() {
                                   {trade.status ?? "Closed"}
                                 </td>
                               );
+                            if (column.id === "actions")
+                              return (
+                                <td key={column.id}>
+                                  <button
+                                    type="button"
+                                    className="table-action-button table-action-button--danger"
+                                    onClick={() =>
+                                      setDeleteTradeCandidate(trade)
+                                    }
+                                    disabled={
+                                      deletingTradeId === trade.trade_id
+                                    }
+                                  >
+                                    {deletingTradeId === trade.trade_id
+                                      ? "Deleting..."
+                                      : "Delete"}
+                                  </button>
+                                </td>
+                              );
                             return <td key={column.id}>-</td>;
                           })}
                         </tr>
@@ -3153,195 +4342,14 @@ export function App() {
                     </tbody>
                   </table>
                 </div>
-              ) : (
-                <p className="empty-copy">
-                  Completed paper trades will appear here after the first exit.
-                </p>
-              )}
-            </section>
-          </section>
-          ) : null}
-        </>
-      ) : activeView === "oneMinuteBot" ? (
-        renderBotPage({
-          eyebrow: "1-Minute Option Bot",
-          title: "1m option-contract execution",
-          subtitle:
-            "Focused view for the two-contract option strategy running on 1-minute candles.",
-          scheduleLabel: "Every 1 min at +2s",
-          strategyKey: DAILY_SETUP_KEYS.oneMinuteBot,
-          trades: oneMinuteOptionTrades,
-          currentActiveTrades: oneMinuteActiveTrades,
-          summary: oneMinuteBotSummary,
-          showContracts: true,
-        })
-      ) : activeView === "trades" ? (
-        <section className="section-block">
-          <div className="section-heading">
-            <p className="eyebrow">Paper Trading</p>
-            <h2 className="section-title">Trade history</h2>
-          </div>
-
-          <div
-            className="range-switcher"
-            role="tablist"
-            aria-label="Trade history strategy filter"
-          >
-            {STRATEGY_FILTER_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={`range-chip ${tradeStrategyFilter === option.id ? "range-chip--active" : ""}`}
-                onClick={() => setTradeStrategyFilter(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">
-                  Completed Trades · {selectedTradeFilterMeta.label}
-                </p>
-                <p className="panel-subtitle">
-                  Entry, exit, risk levels, capital, and net PnL for completed
-                  paper trades in this strategy view.
-                </p>
-              </div>
-              <ColumnPicker
-                label="Trade History"
-                columns={tradeHistoryColumns}
-                selected={selectedTradeHistoryColumns}
-                onToggle={(columnId) =>
-                  toggleColumn(
-                    columnId,
-                    selectedTradeHistoryColumns,
-                    setSelectedTradeHistoryColumns,
-                    tradeHistoryColumns,
-                  )
-                }
-                onReset={() =>
-                  setSelectedTradeHistoryColumns(
-                    tradeHistoryColumns.map((column) => column.id),
-                  )
-                }
-              />
-            </div>
-
-            {filteredTradeHistory.length ? (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      {visibleTradeHistoryColumns.map((column) => (
-                        <th key={column.id}>{column.label}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredTradeHistory.map((trade) => (
-                      <tr key={trade.trade_id}>
-                        {visibleTradeHistoryColumns.map((column) => {
-                          if (column.id === "signal")
-                            return (
-                              <td key={column.id}>
-                                {formatSignal(trade.signal)}
-                              </td>
-                            );
-                          if (column.id === "option_symbol")
-                            return (
-                              <td key={column.id}>
-                                {trade.option_symbol ?? "Not available"}
-                              </td>
-                            );
-                          if (column.id === "entry_time")
-                            return (
-                              <td key={column.id}>
-                                {formatTableDateTime(trade.entry_time)}
-                              </td>
-                            );
-                          if (column.id === "exit_time")
-                            return (
-                              <td key={column.id}>
-                                {formatTableDateTime(trade.exit_time)}
-                              </td>
-                            );
-                          if (column.id === "quantity")
-                            return <td key={column.id}>{trade.quantity ?? "-"}</td>;
-                          if (column.id === "capital_used")
-                            return (
-                              <td key={column.id}>
-                                {formatCurrency(trade.capital_used)}
-                              </td>
-                            );
-                          if (column.id === "entry_price")
-                            return (
-                              <td key={column.id}>
-                                {formatCurrency(trade.entry_price)}
-                              </td>
-                            );
-                          if (column.id === "exit_price")
-                            return (
-                              <td key={column.id}>
-                                {formatCurrency(trade.exit_price)}
-                              </td>
-                            );
-                          if (column.id === "stop_loss_price")
-                            return (
-                              <td key={column.id}>
-                                {formatCurrency(trade.stop_loss_price)}
-                              </td>
-                            );
-                          if (column.id === "stop_loss_source")
-                            return (
-                              <td key={column.id}>
-                                {formatStopLossSource(trade.stop_loss_source)}
-                              </td>
-                            );
-                          if (column.id === "target_price")
-                            return (
-                              <td key={column.id}>
-                                {formatCurrency(trade.target_price)}
-                              </td>
-                            );
-                          if (column.id === "net_pnl")
-                            return (
-                              <td key={column.id}>
-                                <PnlValue
-                                  value={trade.net_pnl}
-                                  baseValue={trade.capital_used}
-                                />
-                              </td>
-                            );
-                          if (column.id === "status")
-                            return <td key={column.id}>{trade.status ?? "Closed"}</td>;
-                          if (column.id === "actions")
-                            return (
-                              <td key={column.id}>
-                                <button
-                                  type="button"
-                                  className="table-action-button table-action-button--danger"
-                                  onClick={() => deleteTrade(trade.trade_id)}
-                                  disabled={deletingTradeId === trade.trade_id}
-                                >
-                                  {deletingTradeId === trade.trade_id
-                                    ? "Deleting..."
-                                    : "Delete"}
-                                </button>
-                              </td>
-                            );
-                          return <td key={column.id}>-</td>;
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                <PaginationControls
+                  {...tradeHistoryTable.pagination.controls}
+                />
+              </>
             ) : (
               <p className="empty-copy">
-                No completed paper trades found for {selectedTradeFilterMeta.label}.
+                No completed paper trades found for{" "}
+                {selectedTradeFilterMeta.label}.
               </p>
             )}
           </section>
@@ -3357,10 +4365,6 @@ export function App() {
             <div className="panel-header">
               <div>
                 <p className="panel-title">Recent Signal Alerts</p>
-                <p className="panel-subtitle">
-                  Live alert history from bot state, with sample alert test
-                  controls.
-                </p>
               </div>
               <ColumnPicker
                 label="Signal Alerts"
@@ -3389,7 +4393,9 @@ export function App() {
                 onClick={() => triggerSampleAlert("BUY")}
                 disabled={triggeringSignal !== ""}
               >
-                {triggeringSignal === "BUY" ? "Sending BUY..." : "Send Sample BUY"}
+                {triggeringSignal === "BUY"
+                  ? "Sending BUY..."
+                  : "Send Sample BUY"}
               </button>
               <button
                 type="button"
@@ -3397,59 +4403,80 @@ export function App() {
                 onClick={() => triggerSampleAlert("SELL")}
                 disabled={triggeringSignal !== ""}
               >
-                {triggeringSignal === "SELL" ? "Sending SELL..." : "Send Sample SELL"}
+                {triggeringSignal === "SELL"
+                  ? "Sending SELL..."
+                  : "Send Sample SELL"}
               </button>
             </div>
 
             {recentAlerts.length ? (
-              <div className="table-wrap">
-                <table className="table-alerts table-auto-fit">
-                  <thead>
-                    <tr>
-                      {visibleSignalAlertColumns.map((column) => (
-                        <th key={column.id}>{column.label}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recentAlerts.map((alert) => (
-                      <tr key={`${alert.alertTime}-${alert.signal}-${alert.close}`}>
-                        {visibleSignalAlertColumns.map((column) => {
-                          if (column.id === "signal")
-                            return (
-                              <td key={column.id}>{formatSignal(alert.signal)}</td>
-                            );
-                          if (column.id === "optionSymbol")
-                            return (
-                              <td key={column.id}>
-                                {alert.optionSymbol ?? alert.symbol ?? "-"}
-                              </td>
-                            );
-                          if (column.id === "close")
-                            return <td key={column.id}>{alert.close?.toFixed(2)}</td>;
-                          if (column.id === "st_10_1")
-                            return <td key={column.id}>{alert.st_10_1?.toFixed(2)}</td>;
-                          if (column.id === "st_10_3")
-                            return <td key={column.id}>{alert.st_10_3?.toFixed(2)}</td>;
-                          if (column.id === "candleTime")
-                            return (
-                              <td key={column.id}>
-                                {formatTableDateTime(alert.candleTime)}
-                              </td>
-                            );
-                          if (column.id === "alertTime")
-                            return (
-                              <td key={column.id}>
-                                {formatTableDateTime(alert.alertTime)}
-                              </td>
-                            );
-                          return <td key={column.id}>-</td>;
-                        })}
+              <>
+                <div className="table-wrap">
+                  <table className="table-alerts table-auto-fit">
+                    <thead>
+                      <tr>
+                        {visibleSignalAlertColumns.map((column) => (
+                          <th key={column.id}>{column.label}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {signalsTable.rows.map((alert) => (
+                        <tr
+                          key={`${alert.alertTime}-${alert.signal}-${alert.close}`}
+                        >
+                          {visibleSignalAlertColumns.map((column) => {
+                            if (column.id === "signal")
+                              return (
+                                <td key={column.id}>
+                                  {formatSignal(alert.signal)}
+                                </td>
+                              );
+                            if (column.id === "optionSymbol")
+                              return (
+                                <td key={column.id}>
+                                  {alert.optionSymbol ?? alert.symbol ?? "-"}
+                                </td>
+                              );
+                            if (column.id === "close")
+                              return (
+                                <td key={column.id}>
+                                  {alert.close?.toFixed(2)}
+                                </td>
+                              );
+                            if (column.id === "st_10_1")
+                              return (
+                                <td key={column.id}>
+                                  {alert.st_10_1?.toFixed(2)}
+                                </td>
+                              );
+                            if (column.id === "st_10_3")
+                              return (
+                                <td key={column.id}>
+                                  {alert.st_10_3?.toFixed(2)}
+                                </td>
+                              );
+                            if (column.id === "candleTime")
+                              return (
+                                <td key={column.id}>
+                                  {formatTableDateTime(alert.candleTime)}
+                                </td>
+                              );
+                            if (column.id === "alertTime")
+                              return (
+                                <td key={column.id}>
+                                  {formatTableDateTime(alert.alertTime)}
+                                </td>
+                              );
+                            return <td key={column.id}>-</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <PaginationControls {...signalsTable.pagination.controls} />
+              </>
             ) : (
               <p className="empty-copy">
                 Recent alerts will appear here once the bot sends or tests a
@@ -3465,151 +4492,439 @@ export function App() {
             <h2 className="section-title">Zerodha order control</h2>
           </div>
 
-          <section className="metrics-grid">
-            <MetricCard
-              label="Live Trading"
-              value={liveTradingStatus.enabled ? "Enabled" : "Disabled"}
-              tone={liveTradingStatus.enabled ? "bad" : "neutral"}
-            />
-            <MetricCard
-              label="Zerodha Ready"
-              value={liveTradingStatus.zerodhaReady ? "Ready" : "Not ready"}
-              tone={liveTradingStatus.zerodhaReady ? "good" : "warn"}
-            />
-            <MetricCard
-              label="Available Cash"
-              value={liveBalance.cash == null ? "Not available" : formatCurrency(liveBalance.cash)}
-              tone={liveBalance.cash == null ? "neutral" : "good"}
-            />
-            <MetricCard
-              label="Live Balance"
-              value={liveBalance.liveBalance == null ? "Not available" : formatCurrency(liveBalance.liveBalance)}
-            />
-            <MetricCard label="Orders" value={formatCount(liveOrders.length)} />
-            <MetricCard label="Trades" value={formatCount(liveTrades.length)} />
-          </section>
-
-          <section className="content-grid">
-            <article className="panel">
-              <div className="panel-header">
-                <div>
-                  <p className="panel-title">Safety Switch</p>
-                  <p className="panel-subtitle">
-                    When enabled, the 1m bot uses the same daily setup and sends real Zerodha orders at the paper-trade entry and exit points.
-                  </p>
-                </div>
+          <section className="panel bot-command-card live-command-card">
+            <div className="bot-command-card__top">
+              <div>
+                <p className="eyebrow">Broker execution</p>
+                <h2>{liveSetupLabel}</h2>
+                <p className="bot-command-card__subtitle">
+                  Uses the selected 1m daily setup before placing Zerodha live
+                  orders.
+                </p>
               </div>
-              <div className="action-row">
+              <span
+                className={`setup-status__pill ${
+                  liveTradingStatus.enabled && liveSelectedStrategyEnabled
+                    ? "setup-status__pill--saved"
+                    : ""
+                }`}
+              >
+                {liveTradingStatus.enabled && liveSelectedStrategyEnabled
+                  ? "Live On"
+                  : liveTradingStatus.enabled
+                    ? "Other Strategy On"
+                    : "Live Off"}
+              </span>
+            </div>
+
+            <div className="bot-command-card__main">
+              <div className="bot-command-card__pnl">
+                <span>Available Cash</span>
+                <strong>
+                  {liveBalance.cash == null
+                    ? "Not available"
+                    : formatCurrency(liveBalance.cash)}
+                </strong>
+                <small>
+                  Live balance:{" "}
+                  {liveBalance.liveBalance == null
+                    ? "Not available"
+                    : formatCurrency(liveBalance.liveBalance)}
+                </small>
+              </div>
+
+              <dl className="bot-command-card__stats live-command-card__stats">
+                <div>
+                  <dt>Market</dt>
+                  <dd>{liveSetupMarket}</dd>
+                </div>
+                <div>
+                  <dt>Zerodha</dt>
+                  <dd>
+                    {liveTradingStatus.zerodhaReady ? "Ready" : "Not ready"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Orders / Trades</dt>
+                  <dd>
+                    {formatCount(liveOrders.length)} /{" "}
+                    {formatCount(liveTrades.length)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Contracts</dt>
+                  <dd>{liveSelectedContracts || "Not set"}</dd>
+                </div>
+                <div>
+                  <dt>Entry Signal</dt>
+                  <dd>
+                    {liveSelectedSetup.entrySignal ??
+                      liveSelectedForm.entrySignal ??
+                      "BUY"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Target / SL</dt>
+                  <dd>
+                    {liveSelectedSetup.targetPct ??
+                      liveSelectedForm.targetPct ??
+                      "-"}
+                    % /{" "}
+                    {formatSnakeLabel(
+                      liveSelectedSetup.stopLossMode ??
+                        liveSelectedForm.stopLossMode ??
+                        "signal_low",
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Last Action</dt>
+                  <dd>
+                    {formatSnakeLabel(liveTradingStatus.lastAction ?? "none")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Broker Error</dt>
+                  <dd>{liveTrading.error ?? "None"}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <form
+              className="backtest-form live-setup-form"
+              onSubmit={(event) =>
+                saveStrategyContracts(event, liveSetupStrategyKey)
+              }
+            >
+              <label className="form-field segmented-field">
+                Underlying
+                <div className="segmented-toggle">
+                  {["NIFTY", "SENSEX"].map((market) => (
+                    <button
+                      key={market}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        liveSetupMarket === market
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() => setLiveSetupMarket(market)}
+                    >
+                      {market}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="form-field segmented-field">
+                Option Side
+                <div className="segmented-toggle segmented-toggle--three">
+                  {["PE", "CE", "BOTH"].map((side) => (
+                    <button
+                      key={side}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        liveSelectedSide === side
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() => updateLiveOptionSide(side)}
+                    >
+                      {side === "BOTH" ? "Both" : side}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="form-field">
+                Start Time
+                <input
+                  type="time"
+                  value={liveSelectedForm.scheduleStart}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "scheduleStart",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                End Time
+                <input
+                  type="time"
+                  value={liveSelectedForm.scheduleEnd}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "scheduleEnd",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Target %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={liveSelectedForm.targetPct}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "targetPct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Max Body %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={liveSelectedForm.maxSignalCandlePct}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "maxSignalCandlePct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Strike Offset
+                <input
+                  type="number"
+                  step={
+                    liveSetupStrategyKey === DAILY_SETUP_KEYS.sensexOneMinuteBot
+                      ? "100"
+                      : "50"
+                  }
+                  value={liveSelectedForm.strikeOffset}
+                  placeholder="0, 100, -100"
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "strikeOffset",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                SL Mode
+                <select
+                  value={liveSelectedForm.stopLossMode}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "stopLossMode",
+                      event.target.value,
+                    )
+                  }
+                >
+                  <option value="signal_low">Signal Low</option>
+                  <option value="percent">Fixed %</option>
+                </select>
+              </label>
+              <label className="form-field">
+                SL %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={liveSelectedForm.stopLossPct}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "stopLossPct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Entry Signal
+                <select
+                  value={liveSelectedForm.entrySignal}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "entrySignal",
+                      event.target.value,
+                    )
+                  }
+                >
+                  <option value="BUY">BUY</option>
+                  <option value="SELL">SELL</option>
+                  <option value="BOTH">Both</option>
+                </select>
+              </label>
+              <button
+                type="submit"
+                className="action-button"
+                disabled={contractSaving}
+              >
+                {contractSaving ? "Saving..." : "Save Live Setup"}
+              </button>
+            </form>
+
+            <div className="bot-command-card__footer live-command-card__footer">
+              <div className="bot-command-card__trade">
+                <div className="bot-command-card__trade-line">
+                  <span className="empty-state-icon" aria-hidden="true">
+                    {liveSelectedSetup.usesDailySetup ? "OK" : "!"}
+                  </span>
+                  <strong>
+                    {liveSelectedSetup.usesDailySetup
+                      ? `Setup saved for ${liveSelectedSetup.date ?? "today"}`
+                      : "Daily setup is not saved yet"}
+                  </strong>
+                </div>
+                <span className="muted-cell">
+                  Last update: {formatDateTime(liveTradingStatus.updatedAt)}
+                </span>
+              </div>
+              <div className="action-row live-command-card__actions">
                 <button
                   type="button"
-                  className={`action-button ${liveTradingStatus.enabled ? "action-button--sell" : "action-button--buy"}`}
-                  onClick={() => toggleLiveTrading(!liveTradingStatus.enabled)}
+                  className={`action-button ${
+                    liveSelectedStrategyEnabled
+                      ? "action-button--sell"
+                      : "action-button--buy"
+                  }`}
+                  onClick={() =>
+                    liveSelectedStrategyEnabled
+                      ? toggleLiveTrading(false)
+                      : setLiveTradingConfirmOpen(true)
+                  }
                   disabled={liveActionBusy === "toggle"}
                 >
                   {liveActionBusy === "toggle"
                     ? "Updating..."
-                    : liveTradingStatus.enabled
-                      ? "Turn Off Live Trading"
-                      : "Turn On Live Trading"}
+                    : liveSelectedStrategyEnabled
+                      ? "Turn Off"
+                      : "Turn On"}
                 </button>
                 <button
                   type="button"
                   className="action-button action-button--secondary"
                   onClick={refreshLiveTradingData}
                 >
-                  Refresh Broker Data
+                  Refresh
                 </button>
               </div>
-              <dl className="status-list">
-                <div>
-                  <dt>Last Update</dt>
-                  <dd>{formatDateTime(liveTradingStatus.updatedAt)}</dd>
-                </div>
-                <div>
-                  <dt>Last Action</dt>
-                  <dd>{formatSnakeLabel(liveTradingStatus.lastAction ?? "none")}</dd>
-                </div>
-                <div>
-                  <dt>Broker Error</dt>
-                  <dd>{liveTrading.error ?? "None"}</dd>
-                </div>
-                <div>
-                  <dt>Strategy Source</dt>
-                  <dd>1m daily setup</dd>
-                </div>
-                <div>
-                  <dt>Contracts</dt>
-                  <dd>
-                    {[oneMinuteLiveSetup.effectiveContracts?.contract1, oneMinuteLiveSetup.effectiveContracts?.contract2]
-                      .filter(Boolean)
-                      .join(" / ") || "Not set"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Entry Signal</dt>
-                  <dd>{oneMinuteLiveSetup.entrySignal ?? "BUY"}</dd>
-                </div>
-                <div>
-                  <dt>Target / SL</dt>
-                  <dd>
-                    {oneMinuteLiveSetup.targetPct ?? strategyConfig.optionTargetPct ?? "-"}% /{" "}
-                    {formatSnakeLabel(oneMinuteLiveSetup.stopLossMode ?? strategyConfig.stopLossMode ?? "signal_low")}
-                  </dd>
-                </div>
-              </dl>
-            </article>
-
+            </div>
           </section>
 
           <section className="panel">
             <div className="panel-header">
               <div>
                 <p className="panel-title">Order Book</p>
-                <p className="panel-subtitle">Fetched from Zerodha order APIs.</p>
               </div>
+              <ColumnPicker
+                label="Order Book"
+                columns={liveOrderColumns}
+                selected={selectedLiveOrderColumns}
+                onToggle={(columnId) =>
+                  toggleColumn(
+                    columnId,
+                    selectedLiveOrderColumns,
+                    setSelectedLiveOrderColumns,
+                    liveOrderColumns,
+                  )
+                }
+                onReset={() =>
+                  setSelectedLiveOrderColumns(
+                    liveOrderColumns.map((column) => column.id),
+                  )
+                }
+              />
             </div>
             {liveOrders.length ? (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Order ID</th>
-                      <th>Time</th>
-                      <th>Symbol</th>
-                      <th>Side</th>
-                      <th>Qty</th>
-                      <th>Type</th>
-                      <th>Status</th>
-                      <th>Avg Price</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {liveOrders.map((order) => (
-                      <tr key={order.order_id}>
-                        <td>{order.order_id}</td>
-                        <td>{formatTableDateTime(order.order_timestamp ?? order.exchange_timestamp)}</td>
-                        <td>{order.tradingsymbol}</td>
-                        <td>{formatSignal(order.transaction_type)}</td>
-                        <td>{order.quantity}</td>
-                        <td>{order.order_type}</td>
-                        <td>{order.status}</td>
-                        <td>{formatCurrency(order.average_price)}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="table-action-button table-action-button--danger"
-                            disabled={!liveTradingStatus.enabled || liveActionBusy === `cancel-${order.order_id}`}
-                            onClick={() => cancelLiveOrder(order.order_id)}
-                          >
-                            {liveActionBusy === `cancel-${order.order_id}` ? "Cancelling..." : "Cancel"}
-                          </button>
-                        </td>
+              <>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        {visibleLiveOrderColumns.map((column) => (
+                          <th key={column.id}>{column.label}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {liveOrdersTable.rows.map((order) => (
+                        <tr key={order.order_id}>
+                          {visibleLiveOrderColumns.map((column) => {
+                            if (column.id === "order_id")
+                              return <td key={column.id}>{order.order_id}</td>;
+                            if (column.id === "time")
+                              return (
+                                <td key={column.id}>
+                                  {formatTableDateTime(
+                                    order.order_timestamp ??
+                                      order.exchange_timestamp,
+                                  )}
+                                </td>
+                              );
+                            if (column.id === "tradingsymbol")
+                              return (
+                                <td key={column.id}>{order.tradingsymbol}</td>
+                              );
+                            if (column.id === "side")
+                              return (
+                                <td key={column.id}>
+                                  {formatSignal(order.transaction_type)}
+                                </td>
+                              );
+                            if (column.id === "quantity")
+                              return <td key={column.id}>{order.quantity}</td>;
+                            if (column.id === "order_type")
+                              return (
+                                <td key={column.id}>{order.order_type}</td>
+                              );
+                            if (column.id === "status")
+                              return <td key={column.id}>{order.status}</td>;
+                            if (column.id === "average_price")
+                              return (
+                                <td key={column.id}>
+                                  {formatCurrency(order.average_price)}
+                                </td>
+                              );
+                            if (column.id === "actions")
+                              return (
+                                <td key={column.id}>
+                                  <button
+                                    type="button"
+                                    className="table-action-button table-action-button--danger"
+                                    disabled={
+                                      !liveTradingStatus.enabled ||
+                                      liveActionBusy ===
+                                        `cancel-${order.order_id}`
+                                    }
+                                    onClick={() =>
+                                      cancelLiveOrder(order.order_id)
+                                    }
+                                  >
+                                    {liveActionBusy ===
+                                    `cancel-${order.order_id}`
+                                      ? "Cancelling..."
+                                      : "Cancel"}
+                                  </button>
+                                </td>
+                              );
+                            return <td key={column.id}>-</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <PaginationControls {...liveOrdersTable.pagination.controls} />
+              </>
             ) : (
               <p className="empty-copy">No Zerodha orders available.</p>
             )}
@@ -3620,19 +4935,67 @@ export function App() {
               <div className="panel-header">
                 <div>
                   <p className="panel-title">Positions</p>
-                  <p className="panel-subtitle">Open positions from Zerodha.</p>
                 </div>
               </div>
-              <pre className="json-preview">{JSON.stringify(livePositions, null, 2)}</pre>
+              {livePositionRows.length ? (
+                <div className="table-wrap live-position-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Symbol</th>
+                        <th>Product</th>
+                        <th>Qty</th>
+                        <th>Avg</th>
+                        <th>LTP</th>
+                        <th>PnL</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {livePositionRows.map((position) => (
+                        <tr
+                          key={`${position.tradingsymbol}-${position.product}`}
+                        >
+                          <td>{position.tradingsymbol}</td>
+                          <td>{position.product ?? "-"}</td>
+                          <td>{formatCount(position.quantity ?? 0)}</td>
+                          <td>{formatCurrency(position.average_price)}</td>
+                          <td>{formatCurrency(position.last_price)}</td>
+                          <td>
+                            <PnlValue
+                              value={position.pnl}
+                              baseValue={Math.abs(
+                                Number(position.average_price ?? 0) *
+                                  Number(position.quantity ?? 0),
+                              )}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="empty-copy">
+                  No open Zerodha positions available.
+                </p>
+              )}
             </article>
             <article className="panel">
               <div className="panel-header">
                 <div>
                   <p className="panel-title">Margins</p>
-                  <p className="panel-subtitle">Margin snapshot from Zerodha.</p>
                 </div>
               </div>
-              <pre className="json-preview">{JSON.stringify(liveMargins, null, 2)}</pre>
+              <dl className="live-margin-grid">
+                {liveMarginRows.map(([label, value]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>
+                      {value == null ? "Not available" : formatCurrency(value)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
             </article>
           </section>
         </section>
@@ -3648,9 +5011,6 @@ export function App() {
               <div className="panel-header">
                 <div>
                   <p className="panel-title">Connection Status</p>
-                  <p className="panel-subtitle">
-                    Login flow for generating and saving the Kite access token.
-                  </p>
                 </div>
               </div>
 
@@ -3672,7 +5032,9 @@ export function App() {
                 </div>
                 <div>
                   <dt>API Secret</dt>
-                  <dd>{zerodha.apiSecretConfigured ? "Configured" : "Missing"}</dd>
+                  <dd>
+                    {zerodha.apiSecretConfigured ? "Configured" : "Missing"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Access Token</dt>
@@ -3711,10 +5073,6 @@ export function App() {
               <div className="panel-header">
                 <div>
                   <p className="panel-title">Runtime Settings</p>
-                  <p className="panel-subtitle">
-                    Quick reference for the active bot schedule and contract
-                    mode.
-                  </p>
                 </div>
               </div>
 
@@ -3793,73 +5151,115 @@ export function App() {
             ))}
           </div>
 
-          <section className="report-metrics-grid">
-            <MetricCard
-              label="Net PnL"
-              value={<PnlValue value={reportMetrics.totalPnl} />}
-              tone={getPnlTone(reportMetrics.totalPnl)}
-            />
-            <MetricCard
-              label="Trades"
-              value={formatCount(reportMetrics.totalTrades)}
-            />
-            <MetricCard
-              label="Win Rate"
-              value={formatPercent(reportMetrics.winRate)}
-              tone={
-                reportMetrics.winRate >= 50
-                  ? "good"
-                  : reportMetrics.totalTrades
-                    ? "bad"
-                    : "neutral"
-              }
-            />
-            <MetricCard
-              label="Profit Factor"
-              value={formatRatio(reportMetrics.profitFactor)}
-              tone={
-                reportMetrics.profitFactor >= 1
-                  ? "good"
-                  : reportMetrics.totalTrades
-                    ? "bad"
-                    : "neutral"
-              }
-            />
-            <MetricCard
-              label="Avg Win"
-              value={<PnlValue value={reportMetrics.averageWin} />}
-              tone="good"
-            />
-            <MetricCard
-              label="Avg Loss"
-              value={<PnlValue value={-reportMetrics.averageLoss} />}
-              tone={reportMetrics.averageLoss ? "bad" : "neutral"}
-            />
-            <MetricCard
-              label="Best Trade"
-              value={<PnlValue value={reportMetrics.bestTrade} />}
-              tone={getPnlTone(reportMetrics.bestTrade)}
-            />
-            <MetricCard
-              label="Worst Trade"
-              value={<PnlValue value={reportMetrics.worstTrade} />}
-              tone={getPnlTone(reportMetrics.worstTrade)}
-            />
-            <MetricCard
-              label="Expectancy"
-              value={<PnlValue value={reportMetrics.expectancy} />}
-              tone={getPnlTone(reportMetrics.expectancy)}
-            />
+          <section className="panel bot-command-card report-command-card">
+            <div className="bot-command-card__top">
+              <div>
+                <p className="eyebrow">Performance Snapshot</p>
+                <h2>{selectedReportFilterMeta.label}</h2>
+                <p className="bot-command-card__subtitle">
+                  {selectedRangeMeta.label} trading performance across closed paper trades.
+                </p>
+              </div>
+              <span
+                className={`setup-status__pill ${
+                  reportMetrics.totalPnl >= 0 ? "setup-status__pill--saved" : ""
+                }`}
+              >
+                {reportMetrics.totalTrades
+                  ? `${formatCount(reportWinCount)}W / ${formatCount(reportLossCount)}L`
+                  : "No Trades"}
+              </span>
+            </div>
+
+            <div className="bot-command-card__main">
+              <div className="bot-command-card__pnl">
+                <span>Net PnL</span>
+                <strong>
+                  <PnlValue value={reportMetrics.totalPnl} />
+                </strong>
+                <small>
+                  {formatCount(reportMetrics.totalTrades)} trades ·{" "}
+                  {formatPercent(reportMetrics.winRate)} win rate
+                </small>
+              </div>
+
+              <dl className="bot-command-card__stats report-command-card__stats">
+                <div>
+                  <dt>Trades</dt>
+                  <dd>{formatCount(reportMetrics.totalTrades)}</dd>
+                </div>
+                <div>
+                  <dt>Win Rate</dt>
+                  <dd>{formatPercent(reportMetrics.winRate)}</dd>
+                </div>
+                <div>
+                  <dt>Profit Factor</dt>
+                  <dd>{formatRatio(reportMetrics.profitFactor)}</dd>
+                </div>
+                <div>
+                  <dt>Expectancy</dt>
+                  <dd>
+                    <PnlValue value={reportMetrics.expectancy} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Avg Win</dt>
+                  <dd>
+                    <PnlValue value={reportMetrics.averageWin} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Avg Loss</dt>
+                  <dd>
+                    <PnlValue value={-reportMetrics.averageLoss} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Best Trade</dt>
+                  <dd>
+                    <PnlValue value={reportMetrics.bestTrade} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Worst Trade</dt>
+                  <dd>
+                    <PnlValue value={reportMetrics.worstTrade} />
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="bot-command-card__footer report-command-card__footer">
+              <div className="bot-command-card__trade">
+                <div className="bot-command-card__trade-line">
+                  <span className="empty-state-icon" aria-hidden="true">
+                    R
+                  </span>
+                  <strong>
+                    {selectedRangeMeta.label} · {selectedReportFilterMeta.label}
+                  </strong>
+                </div>
+                <span className="muted-cell">
+                  Report uses closed trades only, grouped by exit time.
+                </span>
+              </div>
+              <dl className="report-command-card__mini">
+                <div>
+                  <dt>Wins</dt>
+                  <dd>{formatCount(reportWinCount)}</dd>
+                </div>
+                <div>
+                  <dt>Losses</dt>
+                  <dd>{formatCount(reportLossCount)}</dd>
+                </div>
+              </dl>
+            </div>
           </section>
 
           <section className="panel pnl-report-panel">
             <div className="panel-header">
               <div>
                 <p className="panel-title">Hourly PnL Report</p>
-                <p className="panel-subtitle">
-                  Win/loss distribution by exit hour from 09:00 to 16:00 IST for
-                  {` ${selectedReportFilterMeta.label} in the selected range.`}
-                </p>
               </div>
               <label className="toggle-control">
                 <input
@@ -3880,10 +5280,6 @@ export function App() {
             <div className="panel-header">
               <div>
                 <p className="panel-title">Weekday PnL Report</p>
-                <p className="panel-subtitle">
-                  Net PnL grouped by weekday from Monday to Friday for the
-                  {` ${selectedReportFilterMeta.label} selection.`}
-                </p>
               </div>
             </div>
             <WeekdayPnlReport buckets={weekdayPnlReport} />
@@ -3893,10 +5289,6 @@ export function App() {
             <div className="panel-header">
               <div>
                 <p className="panel-title">CE / PE Trade Details</p>
-                <p className="panel-subtitle">
-                  Option-type breakdown for
-                  {` ${selectedReportFilterMeta.label} in the selected range.`}
-                </p>
               </div>
             </div>
             <OptionTypeReport buckets={optionTypeReport} />
@@ -3913,11 +5305,6 @@ export function App() {
             <div className="panel-header">
               <div>
                 <p className="panel-title">Backtest Inputs</p>
-                <p className="panel-subtitle">
-                  Uses the same Supertrend signal rules, with Zerodha option
-                  1-minute candles when available and synthetic fallback
-                  pricing otherwise.
-                </p>
               </div>
             </div>
 
@@ -4026,7 +5413,11 @@ export function App() {
               </label>
               <div className="form-field segmented-field">
                 <span>Stop Loss Rule</span>
-                <div className="segmented-toggle" role="group" aria-label="Stop loss rule">
+                <div
+                  className="segmented-toggle"
+                  role="group"
+                  aria-label="Stop loss rule"
+                >
                   {BACKTEST_STOP_LOSS_MODES.map((mode) => (
                     <button
                       key={mode.id}
@@ -4036,7 +5427,9 @@ export function App() {
                           ? "segmented-toggle__button--active"
                           : ""
                       }`}
-                      onClick={() => updateBacktestField("stopLossMode", mode.id)}
+                      onClick={() =>
+                        updateBacktestField("stopLossMode", mode.id)
+                      }
                     >
                       {mode.label}
                     </button>
@@ -4090,35 +5483,43 @@ export function App() {
                   required
                 />
               </label>
-              <label
-                className={`toggle-switch-field ${
-                  backtestForm.capStopLoss ? "toggle-switch-field--on" : ""
-                } ${
-                  backtestForm.stopLossMode === "percent"
-                    ? "toggle-switch-field--disabled"
-                    : ""
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={backtestForm.capStopLoss}
-                  disabled={backtestForm.stopLossMode === "percent"}
-                  onChange={(event) =>
-                    updateBacktestField("capStopLoss", event.target.checked)
-                  }
-                />
-                <span className="toggle-switch" aria-hidden="true">
-                  <span className="toggle-switch__knob" />
-                </span>
-                <span>Cap signal low</span>
-                <strong>
-                  {backtestForm.stopLossMode === "percent"
-                    ? "N/A"
-                    : backtestForm.capStopLoss
-                      ? "ON"
-                      : "OFF"}
-                </strong>
-              </label>
+              <div className="form-field segmented-field">
+                <span>Cap Signal Low</span>
+                <div
+                  className={`segmented-toggle ${
+                    backtestForm.stopLossMode === "percent"
+                      ? "segmented-toggle--disabled"
+                      : ""
+                  }`}
+                  role="group"
+                  aria-label="Cap signal low"
+                >
+                  <button
+                    type="button"
+                    disabled={backtestForm.stopLossMode === "percent"}
+                    className={`segmented-toggle__button ${
+                      !backtestForm.capStopLoss
+                        ? "segmented-toggle__button--active"
+                        : ""
+                    }`}
+                    onClick={() => updateBacktestField("capStopLoss", false)}
+                  >
+                    Off
+                  </button>
+                  <button
+                    type="button"
+                    disabled={backtestForm.stopLossMode === "percent"}
+                    className={`segmented-toggle__button ${
+                      backtestForm.capStopLoss
+                        ? "segmented-toggle__button--active"
+                        : ""
+                    }`}
+                    onClick={() => updateBacktestField("capStopLoss", true)}
+                  >
+                    On
+                  </button>
+                </div>
+              </div>
               <button
                 type="submit"
                 className="action-button action-button--buy"
@@ -4201,7 +5602,9 @@ export function App() {
                 />
                 <MetricCard
                   label="Instrument"
-                  value={backtestResult.data?.instrumentLabel ?? "Not available"}
+                  value={
+                    backtestResult.data?.instrumentLabel ?? "Not available"
+                  }
                 />
                 <MetricCard
                   label="Lot / Strike Step"
@@ -4213,7 +5616,9 @@ export function App() {
                 />
                 <MetricCard
                   label="Signal Data"
-                  value={formatSnakeLabel(backtestResult.data?.signalDataSource)}
+                  value={formatSnakeLabel(
+                    backtestResult.data?.signalDataSource,
+                  )}
                 />
                 <MetricCard
                   label="1m Data"
@@ -4227,10 +5632,6 @@ export function App() {
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Backtest Hourly PnL Report</p>
-                    <p className="panel-subtitle">
-                      Win/loss distribution by backtest exit hour from 09:00 to
-                      16:00 IST.
-                    </p>
                   </div>
                   <label className="toggle-control">
                     <input
@@ -4253,10 +5654,6 @@ export function App() {
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Backtest Weekday PnL Report</p>
-                    <p className="panel-subtitle">
-                      Net PnL grouped by weekday for the selected backtest
-                      period.
-                    </p>
                   </div>
                 </div>
                 <WeekdayPnlReport buckets={backtestWeekdayPnlReport} />
@@ -4266,10 +5663,6 @@ export function App() {
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Backtest Trades</p>
-                    <p className="panel-subtitle">
-                      Simulated entries and exits from the selected historical
-                      period.
-                    </p>
                   </div>
                   <button
                     type="button"
@@ -4281,76 +5674,604 @@ export function App() {
                   >
                     {backtestExportLoading ? "Saving CSV..." : "Save CSV"}
                   </button>
+                  <ColumnPicker
+                    label="Backtest Trades"
+                    columns={backtestTradeColumns}
+                    selected={selectedBacktestTradeColumns}
+                    onToggle={(columnId) =>
+                      toggleColumn(
+                        columnId,
+                        selectedBacktestTradeColumns,
+                        setSelectedBacktestTradeColumns,
+                        backtestTradeColumns,
+                      )
+                    }
+                    onReset={() =>
+                      setSelectedBacktestTradeColumns(
+                        backtestTradeColumns.map((column) => column.id),
+                      )
+                    }
+                  />
                 </div>
                 {backtestResult.trades?.length ? (
+                  <>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            {visibleBacktestTradeColumns.map((column) => (
+                              <th key={column.id}>{column.label}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {backtestTradesTable.rows.map((trade) => (
+                            <tr
+                              key={`${trade.entryTime}-${trade.signal}-${trade.strike}`}
+                            >
+                              {visibleBacktestTradeColumns.map((column) => {
+                                if (column.id === "signal")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatSignal(trade.signal)}
+                                    </td>
+                                  );
+                                if (column.id === "signalMode")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatSnakeLabel(trade.signalMode)}
+                                    </td>
+                                  );
+                                if (column.id === "entryTime")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatTableDateTime(trade.entryTime)}
+                                    </td>
+                                  );
+                                if (column.id === "entryTiming")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatSnakeLabel(trade.entryTiming)}
+                                    </td>
+                                  );
+                                if (column.id === "exitTime")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatTableDateTime(trade.exitTime)}
+                                    </td>
+                                  );
+                                if (column.id === "instrument")
+                                  return (
+                                    <td key={column.id}>
+                                      {trade.instrument ??
+                                        backtestResult.data?.instrument}
+                                    </td>
+                                  );
+                                if (column.id === "strike")
+                                  return (
+                                    <td key={column.id}>
+                                      {trade.strike} {trade.optionType}
+                                    </td>
+                                  );
+                                if (column.id === "quantity")
+                                  return (
+                                    <td key={column.id}>{trade.quantity}</td>
+                                  );
+                                if (column.id === "baseEntryPrice")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(
+                                        trade.baseEntryPrice ??
+                                          trade.entryPrice,
+                                      )}
+                                    </td>
+                                  );
+                                if (column.id === "entryPrice")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.entryPrice)}
+                                    </td>
+                                  );
+                                if (column.id === "baseExitPrice")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(
+                                        trade.baseExitPrice ?? trade.exitPrice,
+                                      )}
+                                    </td>
+                                  );
+                                if (column.id === "exitPrice")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.exitPrice)}
+                                    </td>
+                                  );
+                                if (column.id === "stopLoss")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.stopLoss)}
+                                    </td>
+                                  );
+                                if (column.id === "stopLossRule")
+                                  return (
+                                    <td key={column.id}>
+                                      {trade.stopLossMode === "percent"
+                                        ? "SL %"
+                                        : formatStopLossSource(
+                                            trade.stopLossSource,
+                                          )}
+                                    </td>
+                                  );
+                                if (column.id === "target")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatCurrency(trade.target)}
+                                    </td>
+                                  );
+                                if (column.id === "netPnl")
+                                  return (
+                                    <td key={column.id}>
+                                      <PnlValue
+                                        value={trade.netPnl}
+                                        baseValue={trade.capitalUsed}
+                                      />
+                                    </td>
+                                  );
+                                if (column.id === "status")
+                                  return (
+                                    <td key={column.id}>{trade.status}</td>
+                                  );
+                                if (column.id === "exitReason")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatSnakeLabel(trade.exitReason)}
+                                    </td>
+                                  );
+                                if (column.id === "executionSource")
+                                  return (
+                                    <td key={column.id}>
+                                      {formatSnakeLabel(trade.executionSource)}
+                                    </td>
+                                  );
+                                return <td key={column.id}>-</td>;
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <PaginationControls
+                      {...backtestTradesTable.pagination.controls}
+                    />
+                  </>
+                ) : (
+                  <p className="empty-copy">
+                    No backtest trades were generated for this configuration.
+                  </p>
+                )}
+              </section>
+            </>
+          ) : null}
+        </section>
+      ) : activeView === "niftyFiveMinuteBacktest" ? (
+        <section className="section-block">
+          <div className="section-heading">
+            <p className="eyebrow">NIFTY 5m Backtesting</p>
+            <h2 className="section-title">BUY-only Supertrend option test</h2>
+          </div>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-title">Backtest Strategy</p>
+              </div>
+            </div>
+
+            <form
+              className="backtest-form"
+              onSubmit={runNiftyFiveMinuteBacktest}
+            >
+              <div className="form-field segmented-field">
+                <span>Contract Mode</span>
+                <div
+                  className="segmented-toggle"
+                  role="group"
+                  aria-label="NIFTY 5m contract mode"
+                >
+                  {[
+                    { id: "fixed", label: "Fixed" },
+                    { id: "dynamic", label: "Dynamic" },
+                  ].map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        niftyFiveMinuteBacktestForm.mode === option.id
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() =>
+                        updateNiftyFiveMinuteBacktestField("mode", option.id)
+                      }
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {niftyFiveMinuteBacktestForm.mode === "fixed" ? (
+                <>
+                  <label className="form-field">
+                    <span>Contract 1</span>
+                    <input
+                      type="text"
+                      value={niftyFiveMinuteBacktestForm.contract1}
+                      placeholder="24000PE"
+                      onChange={(event) =>
+                        updateNiftyFiveMinuteBacktestField(
+                          "contract1",
+                          event.target.value,
+                        )
+                      }
+                      required
+                    />
+                  </label>
+                  <label className="form-field">
+                    <span>Contract 2 (optional)</span>
+                    <input
+                      type="text"
+                      value={niftyFiveMinuteBacktestForm.contract2}
+                      placeholder="24300CE"
+                      onChange={(event) =>
+                        updateNiftyFiveMinuteBacktestField(
+                          "contract2",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </>
+              ) : (
+                <>
+                  <div className="form-field segmented-field">
+                    <span>Contract Side</span>
+                    <div
+                      className="segmented-toggle segmented-toggle--three"
+                      role="group"
+                      aria-label="NIFTY 5m contract side"
+                    >
+                      {["PE", "CE", "BOTH"].map((side) => (
+                        <button
+                          key={side}
+                          type="button"
+                          className={`segmented-toggle__button ${
+                            niftyFiveMinuteBacktestForm.contractSide === side
+                              ? "segmented-toggle__button--active"
+                              : ""
+                          }`}
+                          onClick={() =>
+                            updateNiftyFiveMinuteBacktestField(
+                              "contractSide",
+                              side,
+                            )
+                          }
+                        >
+                          {side === "BOTH" ? "Both" : side}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="form-field">
+                    <span>Strike Offset</span>
+                    <input
+                      type="number"
+                      step="50"
+                      value={niftyFiveMinuteBacktestForm.strikeOffset}
+                      placeholder="0, 100, -100"
+                      onChange={(event) =>
+                        updateNiftyFiveMinuteBacktestField(
+                          "strikeOffset",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </>
+              )}
+
+              <label className="form-field">
+                <span>Entry Day</span>
+                <input
+                  type="date"
+                  value={niftyFiveMinuteBacktestForm.startDate}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "startDate",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Exit Day</span>
+                <input
+                  type="date"
+                  value={niftyFiveMinuteBacktestForm.endDate}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "endDate",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Balance</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={niftyFiveMinuteBacktestForm.balance}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "balance",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Target %</span>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={niftyFiveMinuteBacktestForm.targetPct}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "targetPct",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Max Body %</span>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={niftyFiveMinuteBacktestForm.maxBodyPct}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "maxBodyPct",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Min Body %</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={niftyFiveMinuteBacktestForm.minBodyPct}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "minBodyPct",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Stop Loss %</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={niftyFiveMinuteBacktestForm.stopLossPct}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "stopLossPct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                <span>Entry Time</span>
+                <input
+                  type="time"
+                  value={niftyFiveMinuteBacktestForm.entryTime}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "entryTime",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Exit Time</span>
+                <input
+                  type="time"
+                  value={niftyFiveMinuteBacktestForm.exitTime}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "exitTime",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <button
+                type="submit"
+                className="action-button action-button--buy"
+                disabled={niftyFiveMinuteBacktestLoading}
+              >
+                {niftyFiveMinuteBacktestLoading
+                  ? "Running..."
+                  : "Run NIFTY 5m Backtest"}
+              </button>
+            </form>
+          </section>
+
+          {niftyFiveMinuteBacktestResult ? (
+            <>
+              <section className="report-metrics-grid option-backtest-metrics">
+                <MetricCard
+                  label="Net PnL"
+                  value={
+                    <PnlValue
+                      value={niftyFiveMinuteBacktestResult.summary?.netPnl ?? 0}
+                    />
+                  }
+                  tone={getPnlTone(
+                    niftyFiveMinuteBacktestResult.summary?.netPnl ?? 0,
+                  )}
+                />
+                <MetricCard
+                  label="Trades"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.summary?.tradeCount,
+                  )}
+                />
+                <MetricCard
+                  label="Wins / Losses"
+                  value={`${formatCount(niftyFiveMinuteBacktestResult.summary?.wins)} / ${formatCount(niftyFiveMinuteBacktestResult.summary?.losses)}`}
+                />
+                <MetricCard
+                  label="Win Rate"
+                  value={formatPercent(
+                    niftyFiveMinuteBacktestResult.summary?.winRate,
+                  )}
+                />
+                <MetricCard
+                  label="Profit Factor"
+                  value={formatRatio(
+                    niftyFiveMinuteBacktestResult.summary?.profitFactor,
+                  )}
+                />
+                <MetricCard
+                  label="Contracts"
+                  value={
+                    niftyFiveMinuteBacktestResult.data?.contracts?.length
+                      ? niftyFiveMinuteBacktestResult.data.contracts
+                          .map(formatCompactOptionSymbol)
+                          .join(" / ")
+                      : "Not available"
+                  }
+                />
+                <MetricCard
+                  label="BUY Signals"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data?.rawBuySignalCount,
+                  )}
+                />
+                <MetricCard
+                  label="Body Accepted"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data?.bodyAcceptedSignalCount,
+                  )}
+                />
+                <MetricCard
+                  label="Skipped"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data?.skippedCount,
+                  )}
+                />
+              </section>
+
+              {Object.keys(
+                niftyFiveMinuteBacktestResult.data?.skippedReasonCounts ?? {},
+              ).length ? (
+                <section className="panel">
+                  <div className="panel-header">
+                    <div>
+                      <p className="panel-title">NIFTY 5m Filter Summary</p>
+                    </div>
+                  </div>
+                  <div className="summary-card-grid compact-summary-grid">
+                    {Object.entries(
+                      niftyFiveMinuteBacktestResult.data
+                        ?.skippedReasonCounts ?? {},
+                    ).map(([reason, count]) => (
+                      <div className="summary-chip" key={reason}>
+                        <span>{formatSnakeLabel(reason)}</span>
+                        <strong>{formatCount(count)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <p className="panel-title">NIFTY 5m Backtest Trades</p>
+                  </div>
+                </div>
+                {niftyFiveMinuteBacktestTrades.length ? (
                   <div className="table-wrap">
                     <table>
                       <thead>
                         <tr>
-                          <th>Signal</th>
-                          <th>Signal Rule</th>
+                          <th>Contract</th>
+                          <th>Signal Candle</th>
                           <th>Entry</th>
-                          <th>Entry Trigger</th>
                           <th>Exit</th>
-                          <th>Instrument</th>
-                          <th>Strike</th>
-                          <th>Qty</th>
-                          <th>Market Entry</th>
-                          <th>Exec Entry</th>
-                          <th>Market Exit</th>
-                          <th>Exec Exit</th>
-                          <th>SL</th>
-                          <th>SL Rule</th>
-                          <th>Target</th>
-                          <th>Net PnL</th>
-                          <th>Status</th>
-                          <th>Exit Reason</th>
-                          <th>Source</th>
+                          <th>Entry / Exit</th>
+                          <th>SL / Target</th>
+                          <th>Body %</th>
+                          <th>PnL</th>
+                          <th>Result</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {backtestResult.trades.map((trade) => (
-                          <tr
-                            key={`${trade.entryTime}-${trade.signal}-${trade.strike}`}
-                          >
-                            <td>{formatSignal(trade.signal)}</td>
-                            <td>{formatSnakeLabel(trade.signalMode)}</td>
+                        {niftyFiveMinuteBacktestTrades.map((trade) => (
+                          <tr key={`${trade.optionSymbol}-${trade.entryTime}`}>
+                            <td>{formatCompactOptionSymbol(trade.optionSymbol)}</td>
+                            <td>{formatTableDateTime(trade.candleTime)}</td>
                             <td>{formatTableDateTime(trade.entryTime)}</td>
-                            <td>{formatSnakeLabel(trade.entryTiming)}</td>
                             <td>{formatTableDateTime(trade.exitTime)}</td>
-                            <td>{trade.instrument ?? backtestResult.data?.instrument}</td>
                             <td>
-                              {trade.strike} {trade.optionType}
+                              {formatCurrency(trade.entryPrice)} /{" "}
+                              {formatCurrency(trade.exitPrice)}
                             </td>
-                            <td>{trade.quantity}</td>
                             <td>
-                              {formatCurrency(
-                                trade.baseEntryPrice ?? trade.entryPrice,
-                              )}
+                              {formatCurrency(trade.stopLoss)} /{" "}
+                              {formatCurrency(trade.target)}
+                              {trade.stopLossSource ? (
+                                <span className="muted-inline">
+                                  {" "}
+                                  ({formatSnakeLabel(trade.stopLossSource)})
+                                </span>
+                              ) : null}
                             </td>
-                            <td>{formatCurrency(trade.entryPrice)}</td>
-                            <td>
-                              {formatCurrency(
-                                trade.baseExitPrice ?? trade.exitPrice,
-                              )}
-                            </td>
-                            <td>{formatCurrency(trade.exitPrice)}</td>
-                            <td>{formatCurrency(trade.stopLoss)}</td>
-                            <td>
-                              {trade.stopLossMode === "percent"
-                                ? "SL %"
-                                : formatStopLossSource(trade.stopLossSource)}
-                            </td>
-                            <td>{formatCurrency(trade.target)}</td>
+                            <td>{formatNumber(trade.signalCandleBodyPct)}%</td>
                             <td>
                               <PnlValue
                                 value={trade.netPnl}
                                 baseValue={trade.capitalUsed}
                               />
                             </td>
-                            <td>{trade.status}</td>
-                            <td>{formatSnakeLabel(trade.exitReason)}</td>
-                            <td>{formatSnakeLabel(trade.executionSource)}</td>
+                            <td>
+                              <span
+                                className={`status-pill status-pill--${getStatusTone(trade.status)}`}
+                              >
+                                {trade.status} · {formatSnakeLabel(trade.exitReason)}
+                              </span>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -4358,7 +6279,64 @@ export function App() {
                   </div>
                 ) : (
                   <p className="empty-copy">
-                    No backtest trades were generated for this configuration.
+                    No trades matched the selected NIFTY 5m rules.
+                  </p>
+                )}
+              </section>
+
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <p className="panel-title">Skipped NIFTY 5m Signals</p>
+                  </div>
+                </div>
+                {niftyFiveMinuteBacktestSkipped.length ? (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Contract</th>
+                          <th>Signal Candle</th>
+                          <th>Reason</th>
+                          <th>Body %</th>
+                          <th>Entry</th>
+                          <th>Signal Low</th>
+                          <th>Fixed SL</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {niftyFiveMinuteBacktestSkipped.map((item, index) => (
+                          <tr
+                            key={`${item.optionSymbol ?? "skip"}-${item.candleTime ?? index}-${index}`}
+                          >
+                            <td>
+                              {item.optionSymbol
+                                ? formatCompactOptionSymbol(item.optionSymbol)
+                                : "Not available"}
+                            </td>
+                            <td>{formatTableDateTime(item.candleTime)}</td>
+                            <td>
+                              <span className="status-pill status-pill--warn">
+                                {formatSnakeLabel(item.reason)}
+                              </span>
+                            </td>
+                            <td>
+                              {item.signalCandleBodyPct === null ||
+                              item.signalCandleBodyPct === undefined
+                                ? "Not available"
+                                : `${formatNumber(item.signalCandleBodyPct)}%`}
+                            </td>
+                            <td>{formatCurrency(item.entryPrice)}</td>
+                            <td>{formatCurrency(item.signalCandleLow)}</td>
+                            <td>{formatCurrency(item.fixedStopLoss)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="empty-copy">
+                    No skipped signals for this backtest run.
                   </p>
                 )}
               </section>
@@ -4376,14 +6354,13 @@ export function App() {
             <div className="panel-header">
               <div>
                 <p className="panel-title">Option Contract Inputs</p>
-                <p className="panel-subtitle">
-                  Calculates Supertrend directly on one or two selected option
-                  contracts from Zerodha, matching the live two-contract scan.
-                </p>
               </div>
             </div>
 
-            <form className="backtest-form" onSubmit={runOptionContractBacktest}>
+            <form
+              className="backtest-form"
+              onSubmit={runOptionContractBacktest}
+            >
               <label className="form-field">
                 <span>Exchange</span>
                 <select
@@ -4401,31 +6378,41 @@ export function App() {
                 </select>
               </label>
               <label className="form-field">
-                <span>Contract 1</span>
+                <span>Contract 1 side</span>
                 <input
                   type="text"
                   value={optionBacktestForm.optionSymbol}
-                  placeholder="24000PE or NIFTY26APR24200PE"
+                  placeholder="PE or CE"
                   onChange={(event) =>
-                    updateOptionBacktestField("optionSymbol", event.target.value)
+                    updateOptionBacktestField(
+                      "optionSymbol",
+                      event.target.value,
+                    )
                   }
                   required
                 />
               </label>
               <label className="form-field">
-                <span>Contract 2</span>
+                <span>Contract 2 side (optional)</span>
                 <input
                   type="text"
                   value={optionBacktestForm.optionSymbol2}
-                  placeholder="24100CE or NIFTY26APR24100CE"
+                  placeholder="CE"
                   onChange={(event) =>
-                    updateOptionBacktestField("optionSymbol2", event.target.value)
+                    updateOptionBacktestField(
+                      "optionSymbol2",
+                      event.target.value,
+                    )
                   }
                 />
               </label>
               <div className="form-field segmented-field">
                 <span>Candle Timeframe</span>
-                <div className="segmented-toggle" role="group" aria-label="Option candle timeframe">
+                <div
+                  className="segmented-toggle"
+                  role="group"
+                  aria-label="Option candle timeframe"
+                >
                   {["1m", "5m"].map((interval) => (
                     <button
                       key={interval}
@@ -4445,29 +6432,12 @@ export function App() {
                 </div>
               </div>
               <div className="form-field segmented-field">
-                <span>Signal Rule</span>
-                <div className="segmented-toggle" role="group" aria-label="Option signal rule">
-                  {BACKTEST_SIGNAL_MODE_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`segmented-toggle__button ${
-                        optionBacktestForm.signalMode === option.id
-                          ? "segmented-toggle__button--active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        updateOptionBacktestField("signalMode", option.id)
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="form-field segmented-field">
                 <span>Entry Signal</span>
-                <div className="segmented-toggle" role="group" aria-label="Option entry signal">
+                <div
+                  className="segmented-toggle segmented-toggle--three"
+                  role="group"
+                  aria-label="Option entry signal"
+                >
                   {OPTION_BACKTEST_ENTRY_SIGNALS.map((option) => (
                     <button
                       key={option.id}
@@ -4521,18 +6491,6 @@ export function App() {
                 />
               </label>
               <label className="form-field">
-                <span>Lot Size</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={optionBacktestForm.lotSize}
-                  onChange={(event) =>
-                    updateOptionBacktestField("lotSize", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
                 <span>Target %</span>
                 <input
                   type="number"
@@ -4543,6 +6501,37 @@ export function App() {
                     updateOptionBacktestField("targetPct", event.target.value)
                   }
                   required
+                />
+              </label>
+              <label className="form-field">
+                <span>Max Body %</span>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={optionBacktestForm.maxSignalCandlePct}
+                  onChange={(event) =>
+                    updateOptionBacktestField(
+                      "maxSignalCandlePct",
+                      event.target.value,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label className="form-field">
+                <span>Strike Offset</span>
+                <input
+                  type="number"
+                  step={optionBacktestForm.exchange === "BFO" ? "100" : "50"}
+                  value={optionBacktestForm.strikeOffset}
+                  placeholder="0, 100, -100"
+                  onChange={(event) =>
+                    updateOptionBacktestField(
+                      "strikeOffset",
+                      event.target.value,
+                    )
+                  }
                 />
               </label>
               <label className="form-field">
@@ -4560,7 +6549,11 @@ export function App() {
               </label>
               <div className="form-field segmented-field">
                 <span>Stop Loss Rule</span>
-                <div className="segmented-toggle" role="group" aria-label="Option stop loss rule">
+                <div
+                  className="segmented-toggle"
+                  role="group"
+                  aria-label="Option stop loss rule"
+                >
                   {BACKTEST_STOP_LOSS_MODES.map((mode) => (
                     <button
                       key={mode.id}
@@ -4575,27 +6568,6 @@ export function App() {
                       }
                     >
                       {mode.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="form-field segmented-field">
-                <span>Entry Trigger</span>
-                <div className="segmented-toggle" role="group" aria-label="Option entry trigger">
-                  {BACKTEST_ENTRY_TIMING_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`segmented-toggle__button ${
-                        optionBacktestForm.entryTiming === option.id
-                          ? "segmented-toggle__button--active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        updateOptionBacktestField("entryTiming", option.id)
-                      }
-                    >
-                      {option.label}
                     </button>
                   ))}
                 </div>
@@ -4622,53 +6594,6 @@ export function App() {
                   required
                 />
               </label>
-              <label
-                className={`toggle-switch-field ${
-                  optionBacktestForm.capStopLoss ? "toggle-switch-field--on" : ""
-                } ${
-                  optionBacktestForm.stopLossMode === "percent"
-                    ? "toggle-switch-field--disabled"
-                    : ""
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={optionBacktestForm.capStopLoss}
-                  disabled={optionBacktestForm.stopLossMode === "percent"}
-                  onChange={(event) =>
-                    updateOptionBacktestField("capStopLoss", event.target.checked)
-                  }
-                />
-                <span className="toggle-switch" aria-hidden="true">
-                  <span className="toggle-switch__knob" />
-                </span>
-                <span>Cap signal low</span>
-                <strong>
-                  {optionBacktestForm.stopLossMode === "percent"
-                    ? "N/A"
-                    : optionBacktestForm.capStopLoss
-                      ? "ON"
-                      : "OFF"}
-                </strong>
-              </label>
-              <label
-                className={`toggle-switch-field ${
-                  optionBacktestForm.requireVwap ? "toggle-switch-field--on" : ""
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={optionBacktestForm.requireVwap}
-                  onChange={(event) =>
-                    updateOptionBacktestField("requireVwap", event.target.checked)
-                  }
-                />
-                <span className="toggle-switch" aria-hidden="true">
-                  <span className="toggle-switch__knob" />
-                </span>
-                <span>Below VWAP</span>
-                <strong>{optionBacktestForm.requireVwap ? "ON" : "OFF"}</strong>
-              </label>
               <button
                 type="submit"
                 className="action-button action-button--buy"
@@ -4685,9 +6610,6 @@ export function App() {
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Option Backtest Report</p>
-                    <p className="panel-subtitle">
-                      Save date, contracts, CE/PE trades, and CE/PE PnL as a local CSV.
-                    </p>
                   </div>
                   <button
                     type="button"
@@ -4695,7 +6617,9 @@ export function App() {
                     onClick={exportOptionBacktestReportCsv}
                     disabled={backtestExportLoading}
                   >
-                    {backtestExportLoading ? "Saving CSV..." : "Save Report CSV"}
+                    {backtestExportLoading
+                      ? "Saving CSV..."
+                      : "Save Report CSV"}
                   </button>
                 </div>
               </section>
@@ -4703,52 +6627,96 @@ export function App() {
               <section className="report-metrics-grid option-backtest-metrics">
                 <MetricCard
                   label="Net PnL"
-                  value={<PnlValue value={optionBacktestResult.summary?.netPnl ?? 0} />}
+                  value={
+                    <PnlValue
+                      value={optionBacktestResult.summary?.netPnl ?? 0}
+                    />
+                  }
                   tone={getPnlTone(optionBacktestResult.summary?.netPnl ?? 0)}
                 />
-                <MetricCard label="Trades" value={formatCount(optionBacktestResult.summary?.tradeCount)} />
+                <MetricCard
+                  label="Trades"
+                  value={formatCount(optionBacktestResult.summary?.tradeCount)}
+                />
                 <MetricCard
                   label="Wins / Losses"
                   value={`${formatCount(optionBacktestResult.summary?.wins)} / ${formatCount(optionBacktestResult.summary?.losses)}`}
                 />
-                <MetricCard label="Win Rate" value={formatPercent(optionBacktestResult.summary?.winRate)} />
+                <MetricCard
+                  label="Win Rate"
+                  value={formatPercent(optionBacktestResult.summary?.winRate)}
+                />
                 <MetricCard
                   label="Contracts"
-                  value={(optionBacktestResult.data?.contracts || []).join(" / ") || "-"}
+                  value={
+                    (optionBacktestResult.data?.contracts || []).join(" / ") ||
+                    "-"
+                  }
                 />
-                <MetricCard label="Timeframe" value={optionBacktestResult.data?.signalInterval || optionBacktestResult.data?.interval || "-"} />
-                <MetricCard label="Signal Rule" value={formatSnakeLabel(optionBacktestResult.data?.signalMode)} />
+                <MetricCard
+                  label="Timeframe"
+                  value={
+                    optionBacktestResult.data?.signalInterval ||
+                    optionBacktestResult.data?.interval ||
+                    "-"
+                  }
+                />
+                <MetricCard
+                  label="Signal Rule"
+                  value={formatSnakeLabel(
+                    optionBacktestResult.data?.signalMode,
+                  )}
+                />
                 <MetricCard
                   label="VWAP Filter"
-                  value={optionBacktestResult.request?.require_vwap ? "ON" : "OFF"}
+                  value={
+                    optionBacktestResult.request?.require_vwap ? "ON" : "OFF"
+                  }
                 />
-                <MetricCard label="Selected Signals" value={formatCount(optionBacktestResult.data?.selectedSignalCount)} />
+                <MetricCard
+                  label="Selected Signals"
+                  value={formatCount(
+                    optionBacktestResult.data?.selectedSignalCount,
+                  )}
+                />
                 <MetricCard
                   label="Fast / Both Signals"
                   value={`${formatCount(optionBacktestResult.data?.fastSignalCount)} / ${formatCount(optionBacktestResult.data?.bothSignalCount)}`}
                 />
-                <MetricCard label="Signal Data" value={formatSnakeLabel(optionBacktestResult.data?.signalDataSource)} />
-                <MetricCard label="1m Data" value={formatSnakeLabel(optionBacktestResult.data?.executionDataSource)} />
+                <MetricCard
+                  label="Signal Data"
+                  value={formatSnakeLabel(
+                    optionBacktestResult.data?.signalDataSource,
+                  )}
+                />
+                <MetricCard
+                  label="1m Data"
+                  value={formatSnakeLabel(
+                    optionBacktestResult.data?.executionDataSource,
+                  )}
+                />
               </section>
 
               <section className="panel pnl-report-panel">
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Option Hourly PnL Report</p>
-                    <p className="panel-subtitle">
-                      Win/loss distribution by option-contract exit hour.
-                    </p>
                   </div>
                   <label className="toggle-control">
                     <input
                       type="checkbox"
                       checked={showHourlyPnl}
-                      onChange={(event) => setShowHourlyPnl(event.target.checked)}
+                      onChange={(event) =>
+                        setShowHourlyPnl(event.target.checked)
+                      }
                     />
                     <span>Show hourly PnL</span>
                   </label>
                 </div>
-                <HourlyPnlReport buckets={optionBacktestHourlyPnlReport} showPnl={showHourlyPnl} />
+                <HourlyPnlReport
+                  buckets={optionBacktestHourlyPnlReport}
+                  showPnl={showHourlyPnl}
+                />
               </section>
 
               {optionBacktestResult.data?.contractStats?.length ? (
@@ -4756,41 +6724,166 @@ export function App() {
                   <div className="panel-header">
                     <div>
                       <p className="panel-title">Contract Breakdown</p>
-                      <p className="panel-subtitle">
-                        Signals, executed trades, and skipped entries per tested contract.
-                      </p>
                     </div>
+                    <ColumnPicker
+                      label="Contract Breakdown"
+                      columns={optionContractStatsColumns}
+                      selected={selectedOptionContractStatsColumns}
+                      onToggle={(columnId) =>
+                        toggleColumn(
+                          columnId,
+                          selectedOptionContractStatsColumns,
+                          setSelectedOptionContractStatsColumns,
+                          optionContractStatsColumns,
+                        )
+                      }
+                      onReset={() =>
+                        setSelectedOptionContractStatsColumns(
+                          optionContractStatsColumns.map((column) => column.id),
+                        )
+                      }
+                    />
                   </div>
                   <div className="table-wrap">
                     <table>
                       <thead>
                         <tr>
-                          <th>Contract</th>
-                          <th>Signals</th>
-                          <th>Fast / Both</th>
-                          <th>Trades</th>
-                          <th>Skipped</th>
-                          <th>Net PnL</th>
+                          {visibleOptionContractStatsColumns.map((column) => (
+                            <th key={column.id}>{column.label}</th>
+                          ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {optionBacktestResult.data.contractStats.map((contract) => (
+                        {optionContractStatsTable.rows.map((contract) => (
                           <tr key={contract.optionSymbol}>
-                            <td>{contract.optionSymbol}</td>
-                            <td>{formatCount(contract.selectedSignals)}</td>
-                            <td>
-                              {formatCount(contract.fastSignals)} / {formatCount(contract.bothSignals)}
-                            </td>
-                            <td>{formatCount(contract.trades)}</td>
-                            <td>{formatCount(contract.skipped)}</td>
-                            <td>
-                              <PnlValue value={contract.netPnl} />
-                            </td>
+                            {visibleOptionContractStatsColumns.map((column) => {
+                              if (column.id === "optionSymbol")
+                                return (
+                                  <td key={column.id}>
+                                    {contract.optionSymbol}
+                                  </td>
+                                );
+                              if (column.id === "selectedSignals")
+                                return (
+                                  <td key={column.id}>
+                                    {formatCount(contract.selectedSignals)}
+                                  </td>
+                                );
+                              if (column.id === "fastBoth")
+                                return (
+                                  <td key={column.id}>
+                                    {formatCount(contract.fastSignals)} /{" "}
+                                    {formatCount(contract.bothSignals)}
+                                  </td>
+                                );
+                              if (column.id === "trades")
+                                return (
+                                  <td key={column.id}>
+                                    {formatCount(contract.trades)}
+                                  </td>
+                                );
+                              if (column.id === "skipped")
+                                return (
+                                  <td key={column.id}>
+                                    {formatCount(contract.skipped)}
+                                  </td>
+                                );
+                              if (column.id === "netPnl")
+                                return (
+                                  <td key={column.id}>
+                                    <PnlValue value={contract.netPnl} />
+                                  </td>
+                                );
+                              return <td key={column.id}>-</td>;
+                            })}
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
+                  <PaginationControls
+                    {...optionContractStatsTable.pagination.controls}
+                  />
+                </section>
+              ) : null}
+
+              {optionBacktestResult.data?.optionTypeStats?.length ? (
+                <section className="panel">
+                  <div className="panel-header">
+                    <div>
+                      <p className="panel-title">CE / PE PnL Breakdown</p>
+                    </div>
+                    <ColumnPicker
+                      label="CE / PE Breakdown"
+                      columns={optionTypeStatsColumns}
+                      selected={selectedOptionTypeStatsColumns}
+                      onToggle={(columnId) =>
+                        toggleColumn(
+                          columnId,
+                          selectedOptionTypeStatsColumns,
+                          setSelectedOptionTypeStatsColumns,
+                          optionTypeStatsColumns,
+                        )
+                      }
+                      onReset={() =>
+                        setSelectedOptionTypeStatsColumns(
+                          optionTypeStatsColumns.map((column) => column.id),
+                        )
+                      }
+                    />
+                  </div>
+                  <div className="table-wrap table-wrap--compact">
+                    <table>
+                      <thead>
+                        <tr>
+                          {visibleOptionTypeStatsColumns.map((column) => (
+                            <th key={column.id}>{column.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {optionTypeStatsTable.rows.map((item) => (
+                          <tr key={item.optionType}>
+                            {visibleOptionTypeStatsColumns.map((column) => {
+                              if (column.id === "optionType")
+                                return (
+                                  <td key={column.id}>{item.optionType}</td>
+                                );
+                              if (column.id === "trades")
+                                return (
+                                  <td key={column.id}>
+                                    {formatCount(item.trades)}
+                                  </td>
+                                );
+                              if (column.id === "winsLosses")
+                                return (
+                                  <td key={column.id}>
+                                    {formatCount(item.wins)} /{" "}
+                                    {formatCount(item.losses)}
+                                  </td>
+                                );
+                              if (column.id === "winRate")
+                                return (
+                                  <td key={column.id}>
+                                    {formatPercent(item.winRate)}
+                                  </td>
+                                );
+                              if (column.id === "netPnl")
+                                return (
+                                  <td key={column.id}>
+                                    <PnlValue value={item.netPnl} />
+                                  </td>
+                                );
+                              return <td key={column.id}>-</td>;
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <PaginationControls
+                    {...optionTypeStatsTable.pagination.controls}
+                  />
                 </section>
               ) : null}
 
@@ -4798,9 +6891,6 @@ export function App() {
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Option Weekday PnL Report</p>
-                    <p className="panel-subtitle">
-                      Net PnL grouped by weekday for this option contract.
-                    </p>
                   </div>
                 </div>
                 <WeekdayPnlReport buckets={optionBacktestWeekdayPnlReport} />
@@ -4810,55 +6900,131 @@ export function App() {
                 <div className="panel-header">
                   <div>
                     <p className="panel-title">Option Backtest Trades</p>
-                    <p className="panel-subtitle">
-                      Trades generated from the option contract Supertrend.
-                    </p>
                   </div>
+                  <ColumnPicker
+                    label="Option Backtest Trades"
+                    columns={optionBacktestTradeColumns}
+                    selected={selectedOptionBacktestTradeColumns}
+                    onToggle={(columnId) =>
+                      toggleColumn(
+                        columnId,
+                        selectedOptionBacktestTradeColumns,
+                        setSelectedOptionBacktestTradeColumns,
+                        optionBacktestTradeColumns,
+                      )
+                    }
+                    onReset={() =>
+                      setSelectedOptionBacktestTradeColumns(
+                        optionBacktestTradeColumns.map((column) => column.id),
+                      )
+                    }
+                  />
                 </div>
                 {optionBacktestResult.trades?.length ? (
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Signal</th>
-                          <th>Entry</th>
-                          <th>Exit</th>
-                          <th>Contract</th>
-                          <th>Qty</th>
-                          <th>Exec Entry</th>
-                          <th>Exec Exit</th>
-                          <th>SL</th>
-                          <th>Target</th>
-                          <th>Net PnL</th>
-                          <th>Status</th>
-                          <th>Exit Reason</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {optionBacktestResult.trades.map((trade) => (
-                          <tr key={`${trade.entryTime}-${trade.signal}-${trade.optionSymbol}`}>
-                            <td>{formatSignal(trade.signal)}</td>
-                            <td>{formatTableDateTime(trade.entryTime)}</td>
-                            <td>{formatTableDateTime(trade.exitTime)}</td>
-                            <td>{trade.optionSymbol}</td>
-                            <td>{trade.quantity}</td>
-                            <td>{formatCurrency(trade.entryPrice)}</td>
-                            <td>{formatCurrency(trade.exitPrice)}</td>
-                            <td>{formatCurrency(trade.stopLoss)}</td>
-                            <td>{formatCurrency(trade.target)}</td>
-                            <td>
-                              <PnlValue value={trade.netPnl} baseValue={trade.capitalUsed} />
-                            </td>
-                            <td>{trade.status}</td>
-                            <td>{formatSnakeLabel(trade.exitReason)}</td>
+                  <>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            {visibleOptionBacktestTradeColumns.map((column) => (
+                              <th key={column.id}>{column.label}</th>
+                            ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody>
+                          {optionBacktestTradesTable.rows.map((trade) => (
+                            <tr
+                              key={`${trade.entryTime}-${trade.signal}-${trade.optionSymbol}`}
+                            >
+                              {visibleOptionBacktestTradeColumns.map(
+                                (column) => {
+                                  if (column.id === "signal")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatSignal(trade.signal)}
+                                      </td>
+                                    );
+                                  if (column.id === "entryTime")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatTableDateTime(trade.entryTime)}
+                                      </td>
+                                    );
+                                  if (column.id === "exitTime")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatTableDateTime(trade.exitTime)}
+                                      </td>
+                                    );
+                                  if (column.id === "optionSymbol")
+                                    return (
+                                      <td key={column.id}>
+                                        {trade.optionSymbol}
+                                      </td>
+                                    );
+                                  if (column.id === "quantity")
+                                    return (
+                                      <td key={column.id}>{trade.quantity}</td>
+                                    );
+                                  if (column.id === "entryPrice")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatCurrency(trade.entryPrice)}
+                                      </td>
+                                    );
+                                  if (column.id === "exitPrice")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatCurrency(trade.exitPrice)}
+                                      </td>
+                                    );
+                                  if (column.id === "stopLoss")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatCurrency(trade.stopLoss)}
+                                      </td>
+                                    );
+                                  if (column.id === "target")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatCurrency(trade.target)}
+                                      </td>
+                                    );
+                                  if (column.id === "netPnl")
+                                    return (
+                                      <td key={column.id}>
+                                        <PnlValue
+                                          value={trade.netPnl}
+                                          baseValue={trade.capitalUsed}
+                                        />
+                                      </td>
+                                    );
+                                  if (column.id === "status")
+                                    return (
+                                      <td key={column.id}>{trade.status}</td>
+                                    );
+                                  if (column.id === "exitReason")
+                                    return (
+                                      <td key={column.id}>
+                                        {formatSnakeLabel(trade.exitReason)}
+                                      </td>
+                                    );
+                                  return <td key={column.id}>-</td>;
+                                },
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <PaginationControls
+                      {...optionBacktestTradesTable.pagination.controls}
+                    />
+                  </>
                 ) : (
                   <p className="empty-copy">
-                    No option-contract trades were generated for this configuration.
+                    No option-contract trades were generated for this
+                    configuration.
                   </p>
                 )}
               </section>
@@ -4870,13 +7036,6 @@ export function App() {
           <div className="panel-header">
             <div>
               <p className="panel-title">Run Logs</p>
-              <p className="panel-subtitle">
-                Live run stream with signal state, Supertrend values, and
-                execution messages.
-                {logsSource === "text_log"
-                  ? " Showing fallback entries from nifty_alert_bot.log for this date."
-                  : ""}
-              </p>
             </div>
             <div className="panel-tools">
               <div className="log-filter">
@@ -4929,229 +7088,287 @@ export function App() {
             ))}
           </div>
 
-          <section className="log-summary-grid">
-            <MetricCard
-              label="Stream"
-              value={logsStreamStatus}
-              tone={logsStreamStatus === "live" ? "good" : "warn"}
-            />
-            <MetricCard
-              label="Total Runs"
-              value={formatCount(logCounts.total)}
-            />
-            <MetricCard
-              label="Actions"
-              value={formatCount(logCounts.actions)}
-              tone={logCounts.actions ? "good" : "neutral"}
-            />
-            <MetricCard
-              label="Errors"
-              value={formatCount(logCounts.errors)}
-              tone={logCounts.errors ? "bad" : "neutral"}
-            />
+          <section className="panel bot-command-card log-command-card">
+            <div className="bot-command-card__top">
+              <div>
+                <p className="eyebrow">Run Log Snapshot</p>
+                <h2>{selectedLogFilterMeta.label}</h2>
+                <p className="bot-command-card__subtitle">
+                  {selectedDate} · stream {logsStreamStatus}
+                </p>
+              </div>
+              <span
+                className={`setup-status__pill ${
+                  logsStreamStatus === "live" ? "setup-status__pill--saved" : ""
+                }`}
+              >
+                {logsStreamStatus}
+              </span>
+            </div>
+
+            <div className="bot-command-card__main">
+              <div className="bot-command-card__pnl">
+                <span>Total Runs</span>
+                <strong>{formatCount(logCounts.total)}</strong>
+                <small>
+                  {formatCount(logCounts.actions)} actions ·{" "}
+                  {formatCount(logCounts.errors)} errors
+                </small>
+              </div>
+
+              <dl className="bot-command-card__stats log-command-card__stats">
+                <div>
+                  <dt>Actions</dt>
+                  <dd>{formatCount(logCounts.actions)}</dd>
+                </div>
+                <div>
+                  <dt>Skipped</dt>
+                  <dd>{formatCount(logCounts.skipped)}</dd>
+                </div>
+                <div>
+                  <dt>Errors</dt>
+                  <dd>{formatCount(logCounts.errors)}</dd>
+                </div>
+                <div>
+                  <dt>Source</dt>
+                  <dd>{logsSource}</dd>
+                </div>
+                <div className="log-trend-card">
+                  <dt>Nifty Trend</dt>
+                  <dd>
+                    <span className="log-trend-card__row">
+                      <span>Fast</span>
+                      <TrendBadge value={latestNiftyTrendLog?.fastTrend} />
+                      <span>Slow</span>
+                      <TrendBadge value={latestNiftyTrendLog?.slowTrend} />
+                    </span>
+                    <span className="log-trend-card__contract">
+                      {latestNiftyTrendLog
+                        ? formatCompactOptionSymbol(latestNiftyTrendLog.contract)
+                        : "Not available"}
+                    </span>
+                  </dd>
+                </div>
+                <div className="log-trend-card">
+                  <dt>Sensex Trend</dt>
+                  <dd>
+                    <span className="log-trend-card__row">
+                      <span>Fast</span>
+                      <TrendBadge value={latestSensexTrendLog?.fastTrend} />
+                      <span>Slow</span>
+                      <TrendBadge value={latestSensexTrendLog?.slowTrend} />
+                    </span>
+                    <span className="log-trend-card__contract">
+                      {latestSensexTrendLog
+                        ? formatCompactOptionSymbol(latestSensexTrendLog.contract)
+                        : "Not available"}
+                    </span>
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="bot-command-card__footer log-command-card__footer">
+              <div className="bot-command-card__trade">
+                <div className="bot-command-card__trade-line">
+                  <span className="empty-state-icon" aria-hidden="true">
+                    L
+                  </span>
+                  <strong>
+                    {selectedLogFilterMeta.label} logs for {selectedDate}
+                  </strong>
+                </div>
+                <span className="muted-cell">
+                  Latest trend arrows use the newest log row with available
+                  Supertrend values.
+                </span>
+              </div>
+            </div>
           </section>
 
           {logsLoading ? (
             <p className="empty-copy">Loading run logs...</p>
           ) : filteredLogs.length ? (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    {visibleRunLogColumns.map((column) => (
-                      <th key={column.id}>{column.label}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredLogs.map((log) => (
-                    <tr key={`${log.run_at}-${log.status}-${log.message}`}>
-                      {visibleRunLogColumns.map((column) => {
-                        const contractSignals = getLogContractSignals(log);
-                        if (column.id === "run_at")
-                          return (
-                            <td key={column.id}>
-                              {formatTimeOnly(log.run_at)}
-                            </td>
-                          );
-                        if (column.id === "strategy_mode")
-                          return (
-                            <td key={column.id}>
-                              {formatSnakeLabel(log.strategy_mode ?? "index")}
-                            </td>
-                          );
-                        if (column.id === "option_symbol") {
-                          if (contractSignals.length) {
-                            return (
-                              <td key={column.id}>
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) =>
-                                    item.signal
-                                      ? formatLogSignal(item.signal)
-                                      : formatSnakeLabel(item.status ?? "-")
-                                  }
-                                />
-                              </td>
-                            );
-                          }
-                          return (
-                            <td key={column.id}>
-                              {log.option_symbol ?? log.contractInput ?? "-"}
-                            </td>
-                          );
-                        }
-                        if (column.id === "status") {
-                          return (
-                            <td key={column.id}>
-                              <span
-                                className={`status-pill status-pill--${getStatusTone(log.status)}`}
-                              >
-                                {log.status ?? "unknown"}
-                              </span>
-                            </td>
-                          );
-                        }
-                        if (column.id === "signal")
-                          return (
-                            <td key={column.id}>
-                              {contractSignals.length ? (
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) =>
-                                    formatLogSignal(item.signal)
-                                  }
-                                />
-                              ) : (
-                                formatLogSignal(log.signal)
-                              )}
-                            </td>
-                          );
-                        if (column.id === "close")
-                          return (
-                            <td key={column.id}>
-                              {contractSignals.length ? (
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) =>
-                                    formatLogNumber(item.close)
-                                  }
-                                />
-                              ) : (
-                                formatLogNumber(log.close)
-                              )}
-                            </td>
-                          );
-                        if (column.id === "st_10_1")
-                          return (
-                            <td key={column.id}>
-                              {contractSignals.length ? (
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) =>
-                                    formatLogNumber(item.st_10_1)
-                                  }
-                                />
-                              ) : (
-                                formatLogNumber(log.st_10_1)
-                              )}
-                            </td>
-                          );
-                        if (column.id === "st_10_3")
-                          return (
-                            <td key={column.id}>
-                              {contractSignals.length ? (
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) =>
-                                    formatLogNumber(item.st_10_3)
-                                  }
-                                />
-                              ) : (
-                                formatLogNumber(log.st_10_3)
-                              )}
-                            </td>
-                          );
-                        if (column.id === "st_10_1_trend") {
-                          const trend = formatTrend(log.st_10_1_trend);
-                          if (contractSignals.length) {
-                            return (
-                              <td key={column.id}>
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) => {
-                                    const itemTrend = formatTrend(
-                                      item.st_10_1_trend,
-                                    );
-                                    return (
-                                      <span
-                                        className={`trend-cell trend-cell--${itemTrend.tone}`}
-                                      >
-                                        {itemTrend.icon}
-                                      </span>
-                                    );
-                                  }}
-                                />
-                              </td>
-                            );
-                          }
-                          return (
-                            <td
-                              key={column.id}
-                              className={`trend-cell trend-cell--${trend.tone}`}
-                            >
-                              {trend.icon}
-                            </td>
-                          );
-                        }
-                        if (column.id === "st_10_3_trend") {
-                          const trend = formatTrend(log.st_10_3_trend);
-                          if (contractSignals.length) {
-                            return (
-                              <td key={column.id}>
-                                <ContractSignalList
-                                  items={contractSignals}
-                                  renderValue={(item) => {
-                                    const itemTrend = formatTrend(
-                                      item.st_10_3_trend,
-                                    );
-                                    return (
-                                      <span
-                                        className={`trend-cell trend-cell--${itemTrend.tone}`}
-                                      >
-                                        {itemTrend.icon}
-                                      </span>
-                                    );
-                                  }}
-                                />
-                              </td>
-                            );
-                          }
-                          return (
-                            <td
-                              key={column.id}
-                              className={`trend-cell trend-cell--${trend.tone}`}
-                            >
-                              {trend.icon}
-                            </td>
-                          );
-                        }
-                        if (column.id === "message")
-                          return (
-                            <td key={column.id} className="message-cell">
-                              {log.message ?? "-"}
-                            </td>
-                          );
-                        return <td key={column.id}>-</td>;
-                      })}
+            <>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      {visibleRunLogColumns.map((column) => (
+                        <th key={column.id}>{column.label}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {runLogsTable.rows.map((log) => (
+                      <tr key={`${log.run_at}-${log.status}-${log.message}`}>
+                        {visibleRunLogColumns.map((column) => {
+                          const contractSignals = getLogContractSignals(log);
+                          if (column.id === "run_at")
+                            return (
+                              <td key={column.id}>
+                                {formatTimeOnly(log.run_at)}
+                              </td>
+                            );
+                          if (column.id === "strategy_mode")
+                            return (
+                              <td key={column.id}>
+                                {formatSnakeLabel(log.strategy_mode ?? "index")}
+                              </td>
+                            );
+                          if (column.id === "option_symbol") {
+                            if (contractSignals.length) {
+                              return (
+                                <td key={column.id}>
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) =>
+                                      item.signal
+                                        ? formatLogSignal(item.signal)
+                                        : formatSnakeLabel(item.status ?? "-")
+                                    }
+                                  />
+                                </td>
+                              );
+                            }
+                            return (
+                              <td key={column.id}>
+                                {log.option_symbol || log.contractInput
+                                  ? formatCompactOptionSymbol(
+                                      log.option_symbol ?? log.contractInput,
+                                    )
+                                  : "-"}
+                              </td>
+                            );
+                          }
+                          if (column.id === "status") {
+                            return (
+                              <td key={column.id}>
+                                <span
+                                  className={`status-pill status-pill--${getStatusTone(log.status)}`}
+                                >
+                                  {log.status ?? "unknown"}
+                                </span>
+                              </td>
+                            );
+                          }
+                          if (column.id === "signal")
+                            return (
+                              <td key={column.id}>
+                                {contractSignals.length ? (
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) =>
+                                      formatLogSignal(item.signal)
+                                    }
+                                  />
+                                ) : (
+                                  formatLogSignal(log.signal)
+                                )}
+                              </td>
+                            );
+                          if (column.id === "close")
+                            return (
+                              <td key={column.id}>
+                                {contractSignals.length ? (
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) =>
+                                      formatLogNumber(item.close)
+                                    }
+                                  />
+                                ) : (
+                                  formatLogNumber(log.close)
+                                )}
+                              </td>
+                            );
+                          if (column.id === "st_10_1")
+                            return (
+                              <td key={column.id}>
+                                {contractSignals.length ? (
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) =>
+                                      formatLogNumber(item.st_10_1)
+                                    }
+                                  />
+                                ) : (
+                                  formatLogNumber(log.st_10_1)
+                                )}
+                              </td>
+                            );
+                          if (column.id === "st_10_3")
+                            return (
+                              <td key={column.id}>
+                                {contractSignals.length ? (
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) =>
+                                      formatLogNumber(item.st_10_3)
+                                    }
+                                  />
+                                ) : (
+                                  formatLogNumber(log.st_10_3)
+                                )}
+                              </td>
+                            );
+                          if (column.id === "st_10_1_trend") {
+                            if (contractSignals.length) {
+                              return (
+                                <td key={column.id}>
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) => {
+                                      return <TrendBadge value={item.st_10_1_trend} />;
+                                    }}
+                                  />
+                                </td>
+                              );
+                            }
+                            return (
+                              <td key={column.id}>
+                                <TrendBadge value={log.st_10_1_trend} />
+                              </td>
+                            );
+                          }
+                          if (column.id === "st_10_3_trend") {
+                            if (contractSignals.length) {
+                              return (
+                                <td key={column.id}>
+                                  <ContractSignalList
+                                    items={contractSignals}
+                                    renderValue={(item) => {
+                                      return <TrendBadge value={item.st_10_3_trend} />;
+                                    }}
+                                  />
+                                </td>
+                              );
+                            }
+                            return (
+                              <td key={column.id}>
+                                <TrendBadge value={log.st_10_3_trend} />
+                              </td>
+                            );
+                          }
+                          if (column.id === "message")
+                            return (
+                              <td key={column.id} className="message-cell">
+                                {log.message ?? "-"}
+                              </td>
+                            );
+                          return <td key={column.id}>-</td>;
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <PaginationControls {...runLogsTable.pagination.controls} />
+            </>
           ) : (
             <p className="empty-copy">
-              No {selectedLogFilterMeta.label} run logs found for {selectedDate}.
+              No {selectedLogFilterMeta.label} run logs found for {selectedDate}
+              .
             </p>
           )}
         </section>

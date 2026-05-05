@@ -1,7 +1,7 @@
 {
-  "name": "NIFTY Signal Dashboard",
-  "short_name": "NIFTY Bot",
-  "description": "NIFTY Supertrend paper trading dashboard",
+  "name": "Tradewise",
+  "short_name": "Tradewise",
+  "description": "Tradewise paper trading and signal dashboard",
   "icons": [
     {
       "src": "/app-icon.svg",
@@ -10,8 +10,8 @@
       "purpose": "any maskable"
     }
   ],
-  "theme_color": "#081018",
-  "background_color": "#081018",
+  "theme_color": "#f3f7fb",
+  "background_color": "#f3f7fb",
   "display": "standalone",
   "scope": "/",
   "start_url": "/"

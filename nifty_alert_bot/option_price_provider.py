@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import yfinance as yf
@@ -84,7 +86,7 @@ class OptionPriceProvider:
         self.settings = settings
         self._kite = None
         self._ticker = None
-        self._instrument_rows: list[dict[str, Any]] | None = None
+        self._instrument_rows_by_exchange: dict[str, list[dict[str, Any]]] = {}
         self._ws_started = False
         self._ws_connected = threading.Event()
         self._lock = threading.Lock()
@@ -176,9 +178,21 @@ class OptionPriceProvider:
                 return quotes
             except Exception as exc:
                 if _is_token_error(exc):
-                    logger.info("Zerodha index quote fetch skipped: invalid or expired access token. Falling back to yfinance.")
+                    logger.info("Zerodha index quote fetch skipped: invalid or expired access token.")
                 else:
-                    logger.exception("Zerodha index quote fetch failed. Falling back to yfinance.")
+                    logger.exception("Zerodha index quote fetch failed.")
+
+            return [
+                {
+                    "name": item["name"],
+                    "ltp": None,
+                    "source": "zerodha_unavailable",
+                    "sparkline": [],
+                    "updatedAt": datetime.now(self.settings.timezone).isoformat(),
+                    "error": "Zerodha index quote unavailable.",
+                }
+                for item in instruments
+            ]
 
         quotes = []
         for item in instruments:
@@ -222,6 +236,34 @@ class OptionPriceProvider:
                 )
         return quotes
 
+    def index_ltp(self, underlying: str) -> float | None:
+        target = str(underlying or "").strip().upper()
+        instruments = {
+            "NIFTY": {"key": "NSE:NIFTY 50", "fallback_symbol": "^NSEI"},
+            "SENSEX": {"key": "BSE:SENSEX", "fallback_symbol": "^BSESN"},
+        }
+        item = instruments.get(target)
+        if item is None:
+            return None
+
+        if self.zerodha_available:
+            try:
+                payload = self._get_kite().ltp([item["key"]])
+                quote = payload.get(item["key"], {})
+                if quote.get("last_price") is not None:
+                    return round(float(quote["last_price"]), 2)
+            except Exception as exc:
+                if _is_token_error(exc):
+                    logger.info("Zerodha %s LTP skipped: invalid or expired access token.", target)
+                else:
+                    logger.exception("Failed to fetch Zerodha %s LTP. Falling back to yfinance.", target)
+
+        try:
+            return round(float(fetch_latest_price(item["fallback_symbol"])), 2)
+        except Exception:
+            logger.exception("Failed to fetch fallback %s LTP.", target)
+            return None
+
     def _index_sparkline(self, item: dict[str, Any], limit: int = 36) -> list[dict[str, Any]]:
         now = datetime.now(self.settings.timezone)
 
@@ -246,6 +288,8 @@ class OptionPriceProvider:
                     return points
             except Exception:
                 logger.debug("Zerodha sparkline fetch failed for %s.", item.get("name"), exc_info=True)
+                return []
+            return []
 
         try:
             frame = yf.download(
@@ -276,15 +320,28 @@ class OptionPriceProvider:
         from_dt: datetime,
         to_dt: datetime,
         interval: str,
+        *,
+        use_cache: bool = False,
     ) -> list[dict[str, Any]]:
         if not self.zerodha_available:
             return []
 
         from_ist = from_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
         to_ist = to_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+        cache_path = (
+            self._historical_index_cache_path(instrument, from_ist, to_ist, interval)
+            if use_cache
+            else None
+        )
+
+        if cache_path is not None and cache_path.exists():
+            try:
+                return self._load_cached_candles(cache_path)
+            except Exception:
+                logger.warning("Ignoring unreadable index candle cache %s.", cache_path, exc_info=True)
 
         try:
-            return self._get_kite().historical_data(
+            candles = self._get_kite().historical_data(
                 int(instrument.zerodha_index_token),
                 from_ist.strftime("%Y-%m-%d %H:%M:%S"),
                 to_ist.strftime("%Y-%m-%d %H:%M:%S"),
@@ -292,6 +349,9 @@ class OptionPriceProvider:
                 continuous=False,
                 oi=False,
             )
+            if cache_path is not None and candles:
+                self._save_cached_candles(cache_path, candles)
+            return candles
         except Exception as exc:
             if _is_token_error(exc):
                 logger.info(
@@ -316,6 +376,7 @@ class OptionPriceProvider:
         as_of: datetime,
         exchange: str | None = None,
         underlying: str | None = None,
+        max_expiry_gap_days: int | None = None,
     ) -> OptionContract | None:
         if not self.zerodha_available:
             return None
@@ -332,7 +393,7 @@ class OptionPriceProvider:
                 logger.exception("Unable to load Zerodha option instruments. Falling back to synthetic pricing.")
             return None
 
-        today = as_of.date()
+        as_of_date = as_of.date()
         matches: list[dict[str, Any]] = []
 
         for item in rows:
@@ -344,7 +405,9 @@ class OptionPriceProvider:
                 continue
 
             expiry_date = _parse_expiry(item.get("expiry"))
-            if expiry_date is None or expiry_date < today:
+            if expiry_date is None or expiry_date < as_of_date:
+                continue
+            if max_expiry_gap_days is not None and (expiry_date - as_of_date).days > max_expiry_gap_days:
                 continue
 
             matches.append(item)
@@ -358,7 +421,7 @@ class OptionPriceProvider:
             )
             return None
 
-        chosen = min(matches, key=lambda item: (_parse_expiry(item.get("expiry")) or today, item.get("tradingsymbol", "")))
+        chosen = min(matches, key=lambda item: (_parse_expiry(item.get("expiry")) or as_of_date, item.get("tradingsymbol", "")))
         expiry_value = _parse_expiry(chosen.get("expiry"))
         return OptionContract(
             exchange=str(chosen.get("exchange") or target_exchange),
@@ -409,6 +472,7 @@ class OptionPriceProvider:
         as_of: datetime,
         exchange: str | None = None,
         underlying: str | None = None,
+        max_expiry_gap_days: int | None = None,
     ) -> OptionContract | None:
         normalized = str(contract_input or "").strip().upper().replace(" ", "")
         if not normalized:
@@ -424,6 +488,37 @@ class OptionPriceProvider:
                 as_of,
                 exchange=exchange,
                 underlying=underlying,
+                max_expiry_gap_days=max_expiry_gap_days,
+            )
+
+        side_match = re.fullmatch(r"(CE|PE)", normalized)
+        if side_match:
+            target_underlying = (underlying or self.settings.zerodha_underlying).upper()
+            spot = self.index_ltp(target_underlying)
+            if spot is None:
+                logger.warning("Cannot resolve dynamic %s contract because %s LTP is unavailable.", normalized, target_underlying)
+                return None
+            strike_step = 100 if target_underlying == "SENSEX" else 50
+            atm = int(round(float(spot) / strike_step) * strike_step)
+            option_type = side_match.group(1)
+            strike_offset = int(getattr(self.settings, "option_contract_strike_offset", 0) or 0)
+            strike = atm + strike_offset
+            logger.info(
+                "Resolved dynamic %s %s contract from spot %.2f: ATM=%s offset=%s strike=%s.",
+                target_underlying,
+                option_type,
+                spot,
+                atm,
+                strike_offset,
+                strike,
+            )
+            return self.resolve_contract(
+                strike,
+                option_type,
+                as_of,
+                exchange=exchange,
+                underlying=target_underlying,
+                max_expiry_gap_days=max_expiry_gap_days,
             )
 
         return self.find_contract_by_symbol(normalized, exchange)
@@ -528,15 +623,28 @@ class OptionPriceProvider:
         from_dt: datetime,
         to_dt: datetime,
         interval: str = "minute",
+        *,
+        use_cache: bool = False,
     ) -> list[dict[str, Any]]:
         if not self.zerodha_available:
             return []
 
         from_ist = from_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
         to_ist = to_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+        cache_path = (
+            self._historical_option_cache_path(contract, from_ist, to_ist, interval)
+            if use_cache
+            else None
+        )
+
+        if cache_path is not None and cache_path.exists():
+            try:
+                return self._load_cached_candles(cache_path)
+            except Exception:
+                logger.warning("Ignoring unreadable candle cache %s.", cache_path, exc_info=True)
 
         try:
-            return self._get_kite().historical_data(
+            candles = self._get_kite().historical_data(
                 contract.instrument_token,
                 from_ist.strftime("%Y-%m-%d %H:%M:%S"),
                 to_ist.strftime("%Y-%m-%d %H:%M:%S"),
@@ -544,6 +652,9 @@ class OptionPriceProvider:
                 continuous=False,
                 oi=False,
             )
+            if cache_path is not None and candles:
+                self._save_cached_candles(cache_path, candles)
+            return candles
         except Exception as exc:
             if _is_token_error(exc):
                 logger.info(
@@ -570,14 +681,72 @@ class OptionPriceProvider:
         return self._kite
 
     def _load_option_instruments(self, exchange: str | None = None) -> list[dict[str, Any]]:
-        target_exchange = exchange or self.settings.zerodha_option_exchange
-        if self._instrument_rows is None or target_exchange != self.settings.zerodha_option_exchange:
+        target_exchange = str(exchange or self.settings.zerodha_option_exchange).strip().upper()
+        if target_exchange not in self._instrument_rows_by_exchange:
             kite = self._get_kite()
-            rows = kite.instruments(target_exchange)
-            if target_exchange != self.settings.zerodha_option_exchange:
-                return rows
-            self._instrument_rows = rows
-        return self._instrument_rows
+            self._instrument_rows_by_exchange[target_exchange] = kite.instruments(target_exchange)
+        return self._instrument_rows_by_exchange[target_exchange]
+
+    def _historical_option_cache_path(
+        self,
+        contract: OptionContract,
+        from_ist: datetime,
+        to_ist: datetime,
+        interval: str,
+    ) -> Path:
+        cache_dir = Path(getattr(self.settings, "candle_cache_dir", "logs/candle_cache"))
+        safe_symbol = re.sub(r"[^A-Z0-9_-]+", "_", contract.tradingsymbol.upper())
+        safe_interval = re.sub(r"[^A-Za-z0-9_-]+", "_", str(interval))
+        filename = (
+            f"{contract.exchange.upper()}_{contract.instrument_token}_{safe_symbol}_"
+            f"{safe_interval}_{from_ist:%Y%m%d%H%M}_{to_ist:%Y%m%d%H%M}.json"
+        )
+        return cache_dir / "zerodha_options" / filename
+
+    def _historical_index_cache_path(
+        self,
+        instrument,
+        from_ist: datetime,
+        to_ist: datetime,
+        interval: str,
+    ) -> Path:
+        cache_dir = Path(getattr(self.settings, "candle_cache_dir", "logs/candle_cache"))
+        label = str(getattr(instrument, "label", "") or getattr(instrument, "name", "") or "index")
+        safe_label = re.sub(r"[^A-Z0-9_-]+", "_", label.upper())
+        safe_interval = re.sub(r"[^A-Za-z0-9_-]+", "_", str(interval))
+        filename = (
+            f"{safe_label}_{int(instrument.zerodha_index_token)}_"
+            f"{safe_interval}_{from_ist:%Y%m%d%H%M}_{to_ist:%Y%m%d%H%M}.json"
+        )
+        return cache_dir / "zerodha_indices" / filename
+
+    def _load_cached_candles(self, path: Path) -> list[dict[str, Any]]:
+        with path.open("r", encoding="utf-8") as handle:
+            rows = json.load(handle)
+
+        candles: list[dict[str, Any]] = []
+        for row in rows:
+            candle = dict(row)
+            value = candle.get("date")
+            if isinstance(value, str):
+                candle["date"] = datetime.fromisoformat(value)
+            candles.append(candle)
+        return candles
+
+    def _save_cached_candles(self, path: Path, candles: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        serializable = []
+        for candle in candles:
+            row = dict(candle)
+            value = row.get("date")
+            if hasattr(value, "isoformat"):
+                row["date"] = value.isoformat()
+            serializable.append(row)
+
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(serializable, handle, ensure_ascii=True)
+        temp_path.replace(path)
 
     def _rest_price(self, contract: OptionContract) -> float | None:
         try:
