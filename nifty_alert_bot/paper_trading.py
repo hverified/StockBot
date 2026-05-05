@@ -1310,6 +1310,35 @@ class PaperTradingEngine:
                     "contract_signals": contract_details,
                 },
             )
+        if (
+            signal_candle_body_pct is not None
+            and signal_candle_body_pct < self.settings.option_contract_min_signal_candle_pct
+        ):
+            paper_state["last_signal_key"] = signal_key
+            self._save_paper_state(paper_state)
+            return CycleResult(
+                "skipped",
+                (
+                    "Option-contract signal skipped because signal candle body "
+                    f"{signal_candle_body_pct:.2f}% is below "
+                    f"{self.settings.option_contract_min_signal_candle_pct:.2f}%."
+                ),
+                closed_candle,
+                details={
+                    "strategy_mode": "option_contracts",
+                    "option_symbol": contract.tradingsymbol,
+                    "entry_price": entry_price,
+                    "signal_candle_low": signal_candle_low,
+                    "signal_candle_high": signal_candle_high,
+                    "signal_candle_open": signal_candle_open,
+                    "signal_candle_close": signal_candle_close,
+                    "signal_candle_body_pct": signal_candle_body_pct,
+                    "signal_candle_range_pct": signal_candle_body_pct,
+                    "min_signal_candle_pct": self.settings.option_contract_min_signal_candle_pct,
+                    "skip_reason": "signal_candle_body_below_limit",
+                    "contract_signals": contract_details,
+                },
+            )
 
         stop_loss_mode = str(self.settings.option_contract_stop_loss_mode or "signal_low").lower()
         short_trade = _is_short_trade_signal(entry_signal)
@@ -1382,6 +1411,7 @@ class PaperTradingEngine:
             "signal_candle_body_pct": signal_candle_body_pct,
             "signal_candle_range_pct": signal_candle_body_pct,
             "max_signal_candle_pct": self.settings.option_contract_max_signal_candle_pct,
+            "min_signal_candle_pct": self.settings.option_contract_min_signal_candle_pct,
             "stop_loss_reference": signal_candle_high if short_trade else signal_candle_low,
             "stop_loss_mode": stop_loss_mode,
             "stop_loss_pct": stop_loss_pct,

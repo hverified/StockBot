@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 INDEX_STRATEGY_KEY = "index_5m"
 OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m"
 SENSEX_OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m_sensex"
+NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY = "option_contracts_5m"
+SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY = "option_contracts_5m_sensex"
 
 
 def build_state_store(settings) -> StateStore:
@@ -51,14 +53,23 @@ def strategy_key_for_settings(settings, state_key: str | None = None) -> str | N
 
 
 def option_strategy_settings_for_key(settings, strategy_key: str):
+    is_five_minute = strategy_key in {
+        NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+    }
     base = replace(
         settings,
         strategy_mode="option_contracts",
-        schedule_interval_minutes=settings.option_contract_interval_minutes,
+        option_contract_interval="5m" if is_five_minute else "1m",
+        schedule_interval_minutes=5 if is_five_minute else 1,
         schedule_buffer_seconds=2,
         paper_trade_entry_second=2,
+        option_contract_entry_signal="BUY" if is_five_minute else settings.option_contract_entry_signal,
+        option_contract_target_pct=8 if is_five_minute else settings.option_contract_target_pct,
+        option_contract_min_signal_candle_pct=2 if is_five_minute else settings.option_contract_min_signal_candle_pct,
+        option_contract_strike_offset=100 if is_five_minute else settings.option_contract_strike_offset,
     )
-    if strategy_key == SENSEX_OPTION_CONTRACT_STRATEGY_KEY:
+    if strategy_key in {SENSEX_OPTION_CONTRACT_STRATEGY_KEY, SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY}:
         return replace(
             base,
             zerodha_option_exchange="BFO",
@@ -119,11 +130,18 @@ def apply_daily_option_contracts(
         option_contract_max_signal_candle_pct=float(
             daily_contracts.get("max_signal_candle_pct") or settings.option_contract_max_signal_candle_pct
         ),
+        option_contract_min_signal_candle_pct=float(
+            daily_contracts.get("min_signal_candle_pct")
+            if daily_contracts.get("min_signal_candle_pct") is not None
+            else settings.option_contract_min_signal_candle_pct
+        ),
         option_contract_strike_offset=int(
             daily_contracts.get("strike_offset") if daily_contracts.get("strike_offset") is not None else settings.option_contract_strike_offset
         ),
         option_contract_entry_signal=str(
-            daily_contracts.get("entry_signal") or settings.option_contract_entry_signal
+            "BUY"
+            if settings.option_contract_interval_minutes == 5
+            else daily_contracts.get("entry_signal") or settings.option_contract_entry_signal
         ).upper(),
         option_contract_stop_loss_mode=str(
             daily_contracts.get("stop_loss_mode") or settings.option_contract_stop_loss_mode
@@ -483,6 +501,14 @@ def build_option_contract_strategy_settings(settings) -> list[tuple[Any, str]]:
             option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY),
             SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
         ),
+        (
+            option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY),
+            NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        ),
+        (
+            option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY),
+            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        ),
     ]
 
 
@@ -560,11 +586,9 @@ def run_live(*, force_weekend_runs: bool = False) -> None:
     state = build_state_store(settings)
     run_logs = RunLogStore(settings.run_logs_dir)
     logger.info(
-        "Starting 1m option-contract paper bots for NIFTY and SENSEX. Schedule: %s to %s IST every %s minutes at +%s seconds.",
+        "Starting option-contract paper bots for NIFTY/SENSEX 1m and 5m. Schedule: %s to %s IST at each strategy interval +2 seconds.",
         settings.schedule_start,
         settings.schedule_end,
-        settings.option_contract_interval_minutes,
-        2,
     )
     running_threads: dict[str, threading.Thread] = {}
 

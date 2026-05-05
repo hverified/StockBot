@@ -20,6 +20,7 @@ class Settings:
     option_contract_entry_signal: str
     option_contract_target_pct: float
     option_contract_max_signal_candle_pct: float
+    option_contract_min_signal_candle_pct: float
     option_contract_strike_offset: int
     option_contract_stop_loss_mode: str
     option_contract_stop_loss_pct: float
@@ -126,6 +127,9 @@ def get_settings() -> Settings:
         option_contract_target_pct=float(os.getenv("OPTION_CONTRACT_TARGET_PCT", "3")),
         option_contract_max_signal_candle_pct=float(
             os.getenv("OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT", "10")
+        ),
+        option_contract_min_signal_candle_pct=float(
+            os.getenv("OPTION_CONTRACT_MIN_SIGNAL_CANDLE_PCT", "0")
         ),
         option_contract_strike_offset=int(os.getenv("OPTION_CONTRACT_STRIKE_OFFSET", "0")),
         option_contract_stop_loss_mode=os.getenv("OPTION_CONTRACT_STOP_LOSS_MODE", "signal_low").strip().lower()

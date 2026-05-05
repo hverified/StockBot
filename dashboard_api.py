@@ -24,7 +24,9 @@ from nifty_alert_bot.backtesting import (
 )
 from nifty_alert_bot.config import get_settings
 from nifty_alert_bot.bot import (
+    NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
     OPTION_CONTRACT_STRATEGY_KEY,
+    SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
     SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
     build_state_store,
     option_strategy_settings_for_key,
@@ -69,7 +71,8 @@ class ZerodhaExchangeRequest(BaseModel):
 
 
 class StrategyContractsRequest(BaseModel):
-    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex"] = "option_contracts_1m"
+    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex", "option_contracts_5m", "option_contracts_5m_sensex"] = "option_contracts_1m"
+    contractMode: Literal["fixed", "dynamic"] | None = "dynamic"
     contract1: str
     contract2: str
     scheduleStart: str | None = None
@@ -77,6 +80,7 @@ class StrategyContractsRequest(BaseModel):
     startingBalance: float | None = None
     targetPct: float | None = None
     maxSignalCandlePct: float | None = None
+    minSignalCandlePct: float | None = None
     strikeOffset: int | None = None
     entrySignal: Literal["BUY", "SELL", "BOTH"] | None = None
     stopLossMode: Literal["signal_low", "percent"] | None = None
@@ -85,13 +89,13 @@ class StrategyContractsRequest(BaseModel):
 
 class AddPaperBalanceRequest(BaseModel):
     amount: float
-    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex"] = "option_contracts_1m"
+    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex", "option_contracts_5m", "option_contracts_5m_sensex"] = "option_contracts_1m"
 
 
 class LiveTradingToggleRequest(BaseModel):
     enabled: bool
     enabledStrategyKeys: list[
-        Literal["option_contracts_1m", "option_contracts_1m_sensex"]
+        Literal["option_contracts_1m", "option_contracts_1m_sensex", "option_contracts_5m", "option_contracts_5m_sensex"]
     ] | None = None
 
 
@@ -144,6 +148,7 @@ class OptionContractBacktestApiRequest(BaseModel):
 
 
 class NiftyFiveMinuteBacktestApiRequest(BaseModel):
+    instrument: Literal["NIFTY", "SENSEX"] = "NIFTY"
     mode: Literal["fixed", "dynamic"] = "fixed"
     contract1: str = ""
     contract2: str = ""
@@ -907,10 +912,14 @@ def _strategy_setup_payload(
         "date": trade_date,
         "scheduleStart": schedule_start,
         "scheduleEnd": schedule_end,
+        "contractMode": daily_setup.get("contract_mode") or "dynamic",
         "targetPct": daily_setup.get("target_pct") or target_pct,
         "entrySignal": daily_setup.get("entry_signal") or settings.option_contract_entry_signal,
         "maxSignalCandlePct": daily_setup.get("max_signal_candle_pct")
         or settings.option_contract_max_signal_candle_pct,
+        "minSignalCandlePct": daily_setup.get("min_signal_candle_pct")
+        if daily_setup.get("min_signal_candle_pct") is not None
+        else settings.option_contract_min_signal_candle_pct,
         "strikeOffset": daily_setup.get("strike_offset")
         if daily_setup.get("strike_offset") is not None
         else settings.option_contract_strike_offset,
@@ -996,11 +1005,15 @@ def _load_dashboard_payload() -> dict:
     settings = get_settings()
     nifty_settings = option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY)
     sensex_settings = option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
+    nifty_five_minute_settings = option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
+    sensex_five_minute_settings = option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY)
     state_store = build_state_store(settings)
     try:
         state = state_store.load_state()
         paper_state = state_store.load_paper_trading(OPTION_CONTRACT_STRATEGY_KEY)
         sensex_paper_state = state_store.load_paper_trading(SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
+        nifty_five_minute_paper_state = state_store.load_paper_trading(NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
+        sensex_five_minute_paper_state = state_store.load_paper_trading(SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY)
         trade_date = datetime.now(settings.timezone).date().isoformat()
         nifty_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
@@ -1009,6 +1022,14 @@ def _load_dashboard_payload() -> dict:
         sensex_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
             SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+        )
+        nifty_five_minute_daily_contracts = state_store.load_daily_option_contracts(
+            trade_date,
+            NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        )
+        sensex_five_minute_daily_contracts = state_store.load_daily_option_contracts(
+            trade_date,
+            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
         )
         recent_alerts = _filtered_recent_alerts(state_store.list_recent_alerts())
     finally:
@@ -1047,6 +1068,9 @@ def _load_dashboard_payload() -> dict:
             "optionTargetPct": (daily_contracts or {}).get("target_pct") or settings.option_contract_target_pct,
             "entrySignal": "BUY",
             "maxSignalCandlePct": (daily_contracts or {}).get("max_signal_candle_pct") or settings.option_contract_max_signal_candle_pct,
+            "minSignalCandlePct": (daily_contracts or {}).get("min_signal_candle_pct")
+            if (daily_contracts or {}).get("min_signal_candle_pct") is not None
+            else settings.option_contract_min_signal_candle_pct,
             "stopLossMode": (daily_contracts or {}).get("stop_loss_mode") or settings.option_contract_stop_loss_mode,
             "stopLossPct": (daily_contracts or {}).get("stop_loss_pct") or settings.option_contract_stop_loss_pct,
             "envContracts": {
@@ -1080,6 +1104,28 @@ def _load_dashboard_payload() -> dict:
                     schedule_start=(sensex_daily_contracts or {}).get("schedule_start") or sensex_settings.schedule_start,
                     schedule_end=(sensex_daily_contracts or {}).get("schedule_end") or sensex_settings.schedule_end,
                     target_pct=sensex_settings.option_contract_target_pct,
+                    include_env_contracts=True,
+                ),
+                NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: _strategy_setup_payload(
+                    strategy_key=NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+                    label="NIFTY 5m option bot",
+                    trade_date=trade_date,
+                    daily_setup=nifty_five_minute_daily_contracts,
+                    settings=nifty_five_minute_settings,
+                    schedule_start=(nifty_five_minute_daily_contracts or {}).get("schedule_start") or nifty_five_minute_settings.schedule_start,
+                    schedule_end=(nifty_five_minute_daily_contracts or {}).get("schedule_end") or nifty_five_minute_settings.schedule_end,
+                    target_pct=nifty_five_minute_settings.option_contract_target_pct,
+                    include_env_contracts=True,
+                ),
+                SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY: _strategy_setup_payload(
+                    strategy_key=SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+                    label="SENSEX 5m option bot",
+                    trade_date=trade_date,
+                    daily_setup=sensex_five_minute_daily_contracts,
+                    settings=sensex_five_minute_settings,
+                    schedule_start=(sensex_five_minute_daily_contracts or {}).get("schedule_start") or sensex_five_minute_settings.schedule_start,
+                    schedule_end=(sensex_five_minute_daily_contracts or {}).get("schedule_end") or sensex_five_minute_settings.schedule_end,
+                    target_pct=sensex_five_minute_settings.option_contract_target_pct,
                     include_env_contracts=True,
                 ),
             },
@@ -1118,6 +1164,16 @@ def _load_dashboard_payload() -> dict:
                 sensex_settings,
                 sensex_paper_state,
                 SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+            ),
+            NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: _build_paper_dashboard_payload(
+                nifty_five_minute_settings,
+                nifty_five_minute_paper_state,
+                NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+            ),
+            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY: _build_paper_dashboard_payload(
+                sensex_five_minute_settings,
+                sensex_five_minute_paper_state,
+                SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
             ),
         },
     }
@@ -1177,7 +1233,15 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
 
     if payload.strategyKey in {OPTION_CONTRACT_STRATEGY_KEY, SENSEX_OPTION_CONTRACT_STRATEGY_KEY} and not contract_1:
         raise HTTPException(status_code=400, detail="Contract 1 is required.")
-    if payload.strategyKey in {OPTION_CONTRACT_STRATEGY_KEY, SENSEX_OPTION_CONTRACT_STRATEGY_KEY}:
+    five_minute_strategy = payload.strategyKey in {
+        NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+    }
+    contract_mode = payload.contractMode or "dynamic"
+    if payload.strategyKey in {
+        OPTION_CONTRACT_STRATEGY_KEY,
+        SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+    } or (five_minute_strategy and contract_mode == "dynamic"):
         invalid_sides = [side for side in (contract_1, contract_2) if side and side not in {"CE", "PE"}]
         if invalid_sides:
             raise HTTPException(status_code=400, detail="Use only CE or PE in contract setup.")
@@ -1193,9 +1257,13 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
             {
                 "schedule_start": payload.scheduleStart or settings.schedule_start,
                 "schedule_end": payload.scheduleEnd or settings.schedule_end,
+                "contract_mode": contract_mode,
                 "starting_balance": payload.startingBalance or strategy_settings.paper_trade_capital,
                 "target_pct": payload.targetPct or strategy_settings.option_contract_target_pct,
                 "max_signal_candle_pct": payload.maxSignalCandlePct or strategy_settings.option_contract_max_signal_candle_pct,
+                "min_signal_candle_pct": payload.minSignalCandlePct
+                if payload.minSignalCandlePct is not None
+                else strategy_settings.option_contract_min_signal_candle_pct,
                 "strike_offset": payload.strikeOffset if payload.strikeOffset is not None else strategy_settings.option_contract_strike_offset,
                 "entry_signal": payload.entrySignal or strategy_settings.option_contract_entry_signal,
                 "stop_loss_mode": payload.stopLossMode or strategy_settings.option_contract_stop_loss_mode,
@@ -1228,7 +1296,7 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
         state_store.close()
 
     return {
-        "message": f"{strategy_settings.zerodha_underlying} 1m setup saved for today's trading session.",
+        "message": f"{strategy_settings.zerodha_underlying} {strategy_settings.option_contract_interval} setup saved for today's trading session.",
         "contracts": saved,
     }
 
@@ -1596,6 +1664,7 @@ def run_nifty_five_minute_backtest_api(payload: NiftyFiveMinuteBacktestApiReques
         return run_nifty_five_minute_backtest(
             settings,
             NiftyFiveMinuteBacktestRequest(
+                instrument=payload.instrument,
                 mode=payload.mode,
                 contract_1=payload.contract1,
                 contract_2=payload.contract2,

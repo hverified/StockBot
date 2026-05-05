@@ -60,6 +60,7 @@ class OptionContractBacktestRequest:
 
 @dataclass(frozen=True)
 class NiftyFiveMinuteBacktestRequest:
+    instrument: str
     mode: str
     contract_1: str
     contract_2: str
@@ -894,7 +895,7 @@ def run_nifty_five_minute_backtest(settings, request: NiftyFiveMinuteBacktestReq
     if request.max_body_pct < request.min_body_pct:
         raise ValueError("Max body % must be greater than or equal to Min body %.")
 
-    instrument = get_instrument_spec("NIFTY")
+    instrument = get_instrument_spec(request.instrument)
     option_exchange = instrument.zerodha_option_exchange
     option_underlying = instrument.zerodha_underlying
     signal_interval = "5m"
@@ -959,7 +960,7 @@ def run_nifty_five_minute_backtest(settings, request: NiftyFiveMinuteBacktestReq
                 )
                 if contract is None:
                     raise ValueError(
-                        f"Option contract not found for {contract_input} near {start_date.isoformat()}. "
+                        f"Option contract not found for {instrument.id} {contract_input} near {start_date.isoformat()}. "
                         "The backtest will not fall forward to a later weekly expiry like the current expiry."
                     )
                 contract_specs.append(
@@ -1198,7 +1199,7 @@ def run_nifty_five_minute_backtest(settings, request: NiftyFiveMinuteBacktestReq
             trades.append(
                 {
                     "signal": "BUY",
-                    "instrument": "NIFTY_OPTION_5M",
+                    "instrument": f"{instrument.id}_OPTION_5M",
                     "candleTime": candle_time.isoformat(),
                     "entryTime": entry_at.isoformat(),
                     "exitTime": exit_at.isoformat() if exit_at else None,
@@ -1238,9 +1239,9 @@ def run_nifty_five_minute_backtest(settings, request: NiftyFiveMinuteBacktestReq
             "skipped": skipped[:100],
             "data": {
                 "symbol": " / ".join(context["contract"].tradingsymbol for context in contract_contexts),
-                "instrument": "NIFTY_OPTION_5M",
-                "instrumentLabel": "NIFTY 5m option backtest",
-                "underlying": "NIFTY",
+                "instrument": f"{instrument.id}_OPTION_5M",
+                "instrumentLabel": f"{instrument.label} 5m option backtest",
+                "underlying": instrument.id,
                 "exchange": option_exchange,
                 "contracts": [context["contract"].tradingsymbol for context in contract_contexts],
                 "contractInputs": contract_inputs,

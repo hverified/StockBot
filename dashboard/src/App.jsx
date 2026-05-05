@@ -44,11 +44,15 @@ const STRATEGY_FILTER_OPTIONS = [
   { id: "all", label: "All" },
   { id: "niftyOneMinute", label: "NIFTY 1m" },
   { id: "sensexOneMinute", label: "SENSEX 1m" },
+  { id: "niftyFiveMinute", label: "NIFTY 5m" },
+  { id: "sensexFiveMinute", label: "SENSEX 5m" },
 ];
 const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
   { id: "niftyOneMinuteBot", label: "NIFTY 1m Bot" },
   { id: "sensexOneMinuteBot", label: "SENSEX 1m Bot" },
+  { id: "niftyFiveMinuteBot", label: "NIFTY 5m Bot" },
+  { id: "sensexFiveMinuteBot", label: "SENSEX 5m Bot" },
   { id: "trades", label: "Trades" },
   { id: "signals", label: "Signals" },
   { id: "reports", label: "Reports" },
@@ -79,8 +83,11 @@ const THEME_OPTIONS = [
 const DAILY_SETUP_KEYS = {
   niftyOneMinuteBot: "option_contracts_1m",
   sensexOneMinuteBot: "option_contracts_1m_sensex",
+  niftyFiveMinuteBot: "option_contracts_5m",
+  sensexFiveMinuteBot: "option_contracts_5m_sensex",
 };
 const DEFAULT_DAILY_SETUP_FORM = {
+  contractMode: "dynamic",
   contract1: "",
   contract2: "",
   entrySignal: "BUY",
@@ -89,6 +96,7 @@ const DEFAULT_DAILY_SETUP_FORM = {
   startingBalance: "100000",
   targetPct: "3",
   maxSignalCandlePct: "10",
+  minSignalCandlePct: "0",
   strikeOffset: "0",
   stopLossMode: "signal_low",
   stopLossPct: "8",
@@ -1077,9 +1085,22 @@ export function App() {
       ...DEFAULT_DAILY_SETUP_FORM,
       startingBalance: "100000",
     },
+    option_contracts_5m: {
+      ...DEFAULT_DAILY_SETUP_FORM,
+      targetPct: "8",
+      minSignalCandlePct: "2",
+      strikeOffset: "100",
+    },
+    option_contracts_5m_sensex: {
+      ...DEFAULT_DAILY_SETUP_FORM,
+      targetPct: "8",
+      minSignalCandlePct: "2",
+      strikeOffset: "100",
+      startingBalance: "100000",
+    },
   });
   const [setupEditorOpen, setSetupEditorOpen] = useState({});
-  const [addMoneyAmount, setAddMoneyAmount] = useState("");
+  const [addMoneyAmounts, setAddMoneyAmounts] = useState({});
   const [contractSaving, setContractSaving] = useState(false);
   const [overviewRange, setOverviewRange] = useState(
     () => window.localStorage.getItem("overview-range") ?? "today",
@@ -1144,6 +1165,7 @@ export function App() {
   const [optionBacktestLoading, setOptionBacktestLoading] = useState(false);
   const [niftyFiveMinuteBacktestForm, setNiftyFiveMinuteBacktestForm] =
     useState({
+      instrument: "NIFTY",
       mode: "dynamic",
       contract1: "",
       contract2: "",
@@ -1214,6 +1236,7 @@ export function App() {
         const signature = JSON.stringify({
           contract1: setup.effectiveContracts?.contract1 ?? "",
           contract2: setup.effectiveContracts?.contract2 ?? "",
+          contractMode: setup.contractMode ?? "dynamic",
           scheduleStart: setup.scheduleStart ?? "09:20",
           scheduleEnd: setup.scheduleEnd ?? "15:00",
           startingBalance:
@@ -1224,6 +1247,7 @@ export function App() {
           entrySignal: setup.entrySignal ?? "BUY",
           targetPct: setup.targetPct ?? 3,
           maxSignalCandlePct: setup.maxSignalCandlePct ?? 10,
+          minSignalCandlePct: setup.minSignalCandlePct ?? 0,
           strikeOffset: setup.strikeOffset ?? 0,
           stopLossMode: setup.stopLossMode ?? "signal_low",
           stopLossPct: setup.stopLossPct ?? 8,
@@ -1239,6 +1263,7 @@ export function App() {
           ...DEFAULT_DAILY_SETUP_FORM,
           contract1: setup.effectiveContracts?.contract1 ?? "",
           contract2: setup.effectiveContracts?.contract2 ?? "",
+          contractMode: setup.contractMode ?? "dynamic",
           scheduleStart: setup.scheduleStart ?? "09:20",
           scheduleEnd: setup.scheduleEnd ?? "15:00",
           startingBalance: String(
@@ -1250,6 +1275,7 @@ export function App() {
           entrySignal: setup.entrySignal ?? "BUY",
           targetPct: String(setup.targetPct ?? 3),
           maxSignalCandlePct: String(setup.maxSignalCandlePct ?? 10),
+          minSignalCandlePct: String(setup.minSignalCandlePct ?? 0),
           strikeOffset: String(setup.strikeOffset ?? 0),
           stopLossMode: setup.stopLossMode ?? "signal_low",
           stopLossPct: String(setup.stopLossPct ?? 8),
@@ -1642,6 +1668,7 @@ export function App() {
           startingBalance: Number(contractForm.startingBalance),
           targetPct: Number(contractForm.targetPct),
           maxSignalCandlePct: Number(contractForm.maxSignalCandlePct),
+          minSignalCandlePct: Number(contractForm.minSignalCandlePct),
           strikeOffset: Number(contractForm.strikeOffset),
           stopLossPct: Number(contractForm.stopLossPct),
         }),
@@ -1679,6 +1706,7 @@ export function App() {
     strategyKey = DAILY_SETUP_KEYS.niftyOneMinuteBot,
   ) {
     event.preventDefault();
+    const addMoneyAmount = addMoneyAmounts[strategyKey] ?? "";
     const amount = Number(addMoneyAmount);
     if (!amount || amount <= 0) {
       setError("Enter an amount greater than 0.");
@@ -1703,7 +1731,7 @@ export function App() {
       }
       const payload = await response.json();
       setActionMessage(payload.message ?? "Paper balance updated.");
-      setAddMoneyAmount("");
+      setAddMoneyAmounts((current) => ({ ...current, [strategyKey]: "" }));
       const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
       if (dashboardResponse.ok) setData(await dashboardResponse.json());
     } catch (balanceError) {
@@ -1940,6 +1968,7 @@ export function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          instrument: niftyFiveMinuteBacktestForm.instrument,
           mode: niftyFiveMinuteBacktestForm.mode,
           contract1: niftyFiveMinuteBacktestForm.contract1
             .trim()
@@ -1988,6 +2017,10 @@ export function App() {
     paperTradingByStrategy.option_contracts_1m ?? data?.paperTrading ?? {};
   const sensexPaperTrading =
     paperTradingByStrategy.option_contracts_1m_sensex ?? {};
+  const niftyFiveMinutePaperTrading =
+    paperTradingByStrategy.option_contracts_5m ?? {};
+  const sensexFiveMinutePaperTrading =
+    paperTradingByStrategy.option_contracts_5m_sensex ?? {};
   const paperTrading = niftyPaperTrading;
   const liveTrading = data?.liveTrading ?? {};
   const liveTradingStatus = liveTrading.status ?? {};
@@ -2057,8 +2090,32 @@ export function App() {
     sensexPaperTrading.activeTrades ??
     (rawSensexActiveTrade ? [rawSensexActiveTrade] : []);
   const rawSensexTradeHistory = sensexPaperTrading.tradeHistory ?? [];
-  const activeTrades = [...niftyActiveTrades, ...rawSensexActiveTrades];
-  const tradeHistory = [...niftyTradeHistory, ...rawSensexTradeHistory].sort(
+  const rawNiftyFiveMinuteActiveTrade =
+    niftyFiveMinutePaperTrading.activeTrade ?? null;
+  const rawNiftyFiveMinuteActiveTrades =
+    niftyFiveMinutePaperTrading.activeTrades ??
+    (rawNiftyFiveMinuteActiveTrade ? [rawNiftyFiveMinuteActiveTrade] : []);
+  const rawNiftyFiveMinuteTradeHistory =
+    niftyFiveMinutePaperTrading.tradeHistory ?? [];
+  const rawSensexFiveMinuteActiveTrade =
+    sensexFiveMinutePaperTrading.activeTrade ?? null;
+  const rawSensexFiveMinuteActiveTrades =
+    sensexFiveMinutePaperTrading.activeTrades ??
+    (rawSensexFiveMinuteActiveTrade ? [rawSensexFiveMinuteActiveTrade] : []);
+  const rawSensexFiveMinuteTradeHistory =
+    sensexFiveMinutePaperTrading.tradeHistory ?? [];
+  const activeTrades = [
+    ...niftyActiveTrades,
+    ...rawSensexActiveTrades,
+    ...rawNiftyFiveMinuteActiveTrades,
+    ...rawSensexFiveMinuteActiveTrades,
+  ];
+  const tradeHistory = [
+    ...niftyTradeHistory,
+    ...rawSensexTradeHistory,
+    ...rawNiftyFiveMinuteTradeHistory,
+    ...rawSensexFiveMinuteTradeHistory,
+  ].sort(
     (first, second) =>
       new Date(second.entry_time ?? second.entryTime ?? 0).getTime() -
       new Date(first.entry_time ?? first.entryTime ?? 0).getTime(),
@@ -2067,7 +2124,9 @@ export function App() {
   const zerodha = data?.zerodha ?? {};
   const combinedCapitalBase =
     Number(niftyPaperTrading.capitalBase ?? 0) +
-      Number(sensexPaperTrading.capitalBase ?? 0) ||
+      Number(sensexPaperTrading.capitalBase ?? 0) +
+      Number(niftyFiveMinutePaperTrading.capitalBase ?? 0) +
+      Number(sensexFiveMinutePaperTrading.capitalBase ?? 0) ||
     Number(paperTrading.capitalBase ?? 0);
   const selectedRangeSummary = buildTradeSummaryForRange(
     tradeHistory,
@@ -2213,6 +2272,12 @@ export function App() {
     (trade?.strategy_key ?? trade?.strategyKey) ===
       DAILY_SETUP_KEYS.sensexOneMinuteBot ||
     String(trade?.underlying ?? "").toUpperCase() === "SENSEX";
+  const isNiftyFiveMinuteOptionTrade = (trade) =>
+    (trade?.strategy_key ?? trade?.strategyKey) ===
+    DAILY_SETUP_KEYS.niftyFiveMinuteBot;
+  const isSensexFiveMinuteOptionTrade = (trade) =>
+    (trade?.strategy_key ?? trade?.strategyKey) ===
+    DAILY_SETUP_KEYS.sensexFiveMinuteBot;
   const oneMinuteOptionTrades = tradeHistory.filter(isNiftyOptionTrade);
   const oneMinuteActiveTrades = niftyActiveTrades.filter(isNiftyOptionTrade);
   const sensexTradeHistory = rawSensexTradeHistory;
@@ -2221,9 +2286,23 @@ export function App() {
     sensexTradeHistory.filter(isSensexOptionTrade);
   const sensexOneMinuteActiveTrades =
     sensexActiveTrades.filter(isSensexOptionTrade);
+  const niftyFiveMinuteOptionTrades = rawNiftyFiveMinuteTradeHistory.filter(
+    isNiftyFiveMinuteOptionTrade,
+  );
+  const niftyFiveMinuteActiveTrades = rawNiftyFiveMinuteActiveTrades.filter(
+    isNiftyFiveMinuteOptionTrade,
+  );
+  const sensexFiveMinuteOptionTrades = rawSensexFiveMinuteTradeHistory.filter(
+    isSensexFiveMinuteOptionTrade,
+  );
+  const sensexFiveMinuteActiveTrades = rawSensexFiveMinuteActiveTrades.filter(
+    isSensexFiveMinuteOptionTrade,
+  );
   const filterTradesByStrategy = (filterId) => {
     if (filterId === "niftyOneMinute") return oneMinuteOptionTrades;
     if (filterId === "sensexOneMinute") return sensexOneMinuteOptionTrades;
+    if (filterId === "niftyFiveMinute") return niftyFiveMinuteOptionTrades;
+    if (filterId === "sensexFiveMinute") return sensexFiveMinuteOptionTrades;
     return tradeHistory;
   };
   const filteredTradeHistory = filterTradesByStrategy(tradeStrategyFilter);
@@ -2282,6 +2361,14 @@ export function App() {
     sensexOneMinuteOptionTrades,
     sensexOneMinuteActiveTrades,
   );
+  const niftyFiveMinuteBotSummary = buildBotPageSummary(
+    niftyFiveMinuteOptionTrades,
+    niftyFiveMinuteActiveTrades,
+  );
+  const sensexFiveMinuteBotSummary = buildBotPageSummary(
+    sensexFiveMinuteOptionTrades,
+    sensexFiveMinuteActiveTrades,
+  );
   const overviewBotCards = [
     {
       label: "NIFTY",
@@ -2303,6 +2390,28 @@ export function App() {
       trendLog: latestSensexTrendLog,
       setup:
         strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.sensexOneMinuteBot] ??
+        {},
+    },
+    {
+      label: "NIFTY 5m",
+      strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBot,
+      paperTrading: niftyFiveMinutePaperTrading,
+      activeTrades: niftyFiveMinuteActiveTrades,
+      summary: niftyFiveMinuteBotSummary,
+      trendLog: latestNiftyTrendLog,
+      setup:
+        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.niftyFiveMinuteBot] ??
+        {},
+    },
+    {
+      label: "SENSEX 5m",
+      strategyKey: DAILY_SETUP_KEYS.sensexFiveMinuteBot,
+      paperTrading: sensexFiveMinutePaperTrading,
+      activeTrades: sensexFiveMinuteActiveTrades,
+      summary: sensexFiveMinuteBotSummary,
+      trendLog: latestSensexTrendLog,
+      setup:
+        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.sensexFiveMinuteBot] ??
         {},
     },
   ];
@@ -2720,8 +2829,13 @@ export function App() {
     const setupForm = contractForms[strategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
     const setupConfig =
       data?.strategyConfig?.strategySetups?.[strategyKey] ?? {};
-    const setupTitle = showContracts ? "1m daily setup" : "5m daily setup";
     const setupLabel = setupConfig.label ?? "1m option bot";
+    const isFiveMinuteSetup = setupLabel.includes("5m");
+    const intervalLabel = isFiveMinuteSetup ? "5m" : "1m";
+    const addMoneyAmount = addMoneyAmounts[strategyKey] ?? "";
+    const setupTitle = showContracts
+      ? `${intervalLabel} daily setup`
+      : "5m daily setup";
     const contractPlaceholder1 = "PE";
     const contractPlaceholder2 = "CE";
     const setupSavedToday = Boolean(setupConfig.usesDailySetup);
@@ -2736,7 +2850,7 @@ export function App() {
     const setupSubtitle = showContracts
       ? setupSavedToday
         ? "Today's setup is saved. Edit the fields below and save again to update the same setup."
-        : "Today's setup is not set. Save at least Contract 1 and risk settings before the bot scans."
+        : "Today's setup is not set. Save at least Contract 1 side and risk settings before the bot scans."
       : "Save the trading window, balance, and risk settings used by the 5-minute bot today.";
     return (
       <section className="section-block">
@@ -2769,7 +2883,7 @@ export function App() {
           <div className="bot-command-card__top">
             <div>
               <p className="eyebrow">
-                {showContracts ? "1m option bot" : "Signal bot"}
+                {showContracts ? `${intervalLabel} option bot` : "Signal bot"}
               </p>
               <h2>{title}</h2>
               <p className="bot-command-card__subtitle">{scheduleLabel}</p>
@@ -2884,7 +2998,12 @@ export function App() {
                     type="number"
                     min="1"
                     value={addMoneyAmount}
-                    onChange={(event) => setAddMoneyAmount(event.target.value)}
+                    onChange={(event) =>
+                      setAddMoneyAmounts((current) => ({
+                        ...current,
+                        [strategyKey]: event.target.value,
+                      }))
+                    }
                     placeholder="10000"
                   />
                 </label>
@@ -2910,13 +3029,13 @@ export function App() {
               <div>
                 <p className="setup-status__title">
                   {setupSavedToday
-                    ? "Today's 1m setup is saved"
-                    : "Today's 1m setup is not set"}
+                    ? `Today's ${intervalLabel} setup is saved`
+                    : `Today's ${intervalLabel} setup is not set`}
                 </p>
                 <p className="setup-status__copy">
                   {setupSavedToday
                     ? `Editing this form will update the setup for ${setupConfig.date ?? "today"}.`
-                    : "The bot will not have daily contract inputs until you save at least Contract 1 for today."}
+                    : `The ${intervalLabel} bot will not scan until you save its own setup for today.`}
                 </p>
               </div>
               <span className="setup-status__pill">
@@ -2951,12 +3070,54 @@ export function App() {
             >
               {showContracts ? (
                 <>
+                  {isFiveMinuteSetup ? (
+                    <div className="form-field segmented-field">
+                      <span>Contract Mode</span>
+                      <div
+                        className="segmented-toggle"
+                        role="group"
+                        aria-label={`${setupLabel} contract mode`}
+                      >
+                        {[
+                          { id: "fixed", label: "Fixed" },
+                          { id: "dynamic", label: "Dynamic" },
+                        ].map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            className={`segmented-toggle__button ${
+                              setupForm.contractMode === option.id
+                                ? "segmented-toggle__button--active"
+                                : ""
+                            }`}
+                            onClick={() =>
+                              updateContractField(
+                                strategyKey,
+                                "contractMode",
+                                option.id,
+                              )
+                            }
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <label className="form-field">
-                    Contract 1 side
+                    {isFiveMinuteSetup && setupForm.contractMode === "fixed"
+                      ? "Contract 1"
+                      : "Contract 1 side"}
                     <input
                       type="text"
                       value={setupForm.contract1}
-                      placeholder={contractPlaceholder1}
+                      placeholder={
+                        isFiveMinuteSetup && setupForm.contractMode === "fixed"
+                          ? setupConfig.label?.includes("SENSEX")
+                            ? "76000PE"
+                            : "24000PE"
+                          : contractPlaceholder1
+                      }
                       onChange={(event) =>
                         updateContractField(
                           strategyKey,
@@ -2967,11 +3128,19 @@ export function App() {
                     />
                   </label>
                   <label className="form-field">
-                    Contract 2 side (optional)
+                    {isFiveMinuteSetup && setupForm.contractMode === "fixed"
+                      ? "Contract 2 (optional)"
+                      : "Contract 2 side (optional)"}
                     <input
                       type="text"
                       value={setupForm.contract2}
-                      placeholder={contractPlaceholder2}
+                      placeholder={
+                        isFiveMinuteSetup && setupForm.contractMode === "fixed"
+                          ? setupConfig.label?.includes("SENSEX")
+                            ? "76200CE"
+                            : "24300CE"
+                          : contractPlaceholder2
+                      }
                       onChange={(event) =>
                         updateContractField(
                           strategyKey,
@@ -2981,23 +3150,25 @@ export function App() {
                       }
                     />
                   </label>
-                  <label className="form-field">
-                    Entry Signal
-                    <select
-                      value={setupForm.entrySignal}
-                      onChange={(event) =>
-                        updateContractField(
-                          strategyKey,
-                          "entrySignal",
-                          event.target.value,
-                        )
-                      }
-                    >
-                      <option value="BUY">BUY</option>
-                      <option value="SELL">SELL</option>
-                      <option value="BOTH">Both</option>
-                    </select>
-                  </label>
+                  {!isFiveMinuteSetup ? (
+                    <label className="form-field">
+                      Entry Signal
+                      <select
+                        value={setupForm.entrySignal}
+                        onChange={(event) =>
+                          updateContractField(
+                            strategyKey,
+                            "entrySignal",
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="BUY">BUY</option>
+                        <option value="SELL">SELL</option>
+                        <option value="BOTH">Both</option>
+                      </select>
+                    </label>
+                  ) : null}
                 </>
               ) : null}
               <label className="form-field">
@@ -3089,11 +3260,28 @@ export function App() {
                     />
                   </label>
                   <label className="form-field">
+                    Min Body %
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={setupForm.minSignalCandlePct}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "minSignalCandlePct",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
                     Strike Offset
                     <input
                       type="number"
                       step={
-                        strategyKey === DAILY_SETUP_KEYS.sensexOneMinuteBot
+                        strategyKey === DAILY_SETUP_KEYS.sensexOneMinuteBot ||
+                        strategyKey === DAILY_SETUP_KEYS.sensexFiveMinuteBot
                           ? "100"
                           : "50"
                       }
@@ -3167,12 +3355,24 @@ export function App() {
             </div>
             {showContracts ? (
               <div>
+                <dt>Setup Key</dt>
+                <dd>{strategyKey}</dd>
+              </div>
+            ) : null}
+            {showContracts ? (
+              <div>
                 <dt>Last Saved</dt>
                 <dd>
                   {setupSavedAt
                     ? formatDateTime(setupSavedAt)
                     : "Not set today"}
                 </dd>
+              </div>
+            ) : null}
+            {showContracts ? (
+              <div>
+                <dt>Contract Mode</dt>
+                <dd>{formatSnakeLabel(setupConfig.contractMode ?? "dynamic")}</dd>
               </div>
             ) : null}
             {showContracts ? (
@@ -3195,8 +3395,11 @@ export function App() {
             ) : null}
             {showContracts ? (
               <div>
-                <dt>Max Body</dt>
-                <dd>{setupConfig.maxSignalCandlePct ?? "-"}%</dd>
+                <dt>Body Range</dt>
+                <dd>
+                  {setupConfig.minSignalCandlePct ?? 0}% -{" "}
+                  {setupConfig.maxSignalCandlePct ?? "-"}%
+                </dd>
               </div>
             ) : null}
             {showContracts ? (
@@ -3313,7 +3516,9 @@ export function App() {
             {activeView === "overview"
               ? "Feed"
               : activeView === "niftyOneMinuteBot" ||
-                  activeView === "sensexOneMinuteBot"
+                  activeView === "sensexOneMinuteBot" ||
+                  activeView === "niftyFiveMinuteBot" ||
+                  activeView === "sensexFiveMinuteBot"
                 ? "Bot"
                 : activeView === "trades"
                   ? "History"
@@ -3334,6 +3539,10 @@ export function App() {
                 ? "NIFTY 1m"
                 : activeView === "sensexOneMinuteBot"
                   ? "SENSEX 1m"
+                  : activeView === "niftyFiveMinuteBot"
+                    ? "NIFTY 5m"
+                    : activeView === "sensexFiveMinuteBot"
+                      ? "SENSEX 5m"
                   : activeView === "trades"
                     ? `${formatCount(tradeHistory.length)} trades`
                     : activeView === "signals"
@@ -3704,7 +3913,11 @@ export function App() {
                   >
                     <div className="bot-command-card__top">
                       <div>
-                        <p className="eyebrow">1m Option Bot</p>
+                        <p className="eyebrow">
+                          {bot.setup.label?.includes("5m")
+                            ? "5m Option Bot"
+                            : "1m Option Bot"}
+                        </p>
                         <h2>{bot.label}</h2>
                         <p className="bot-command-card__subtitle">
                           {side1} / {side2} · Next expiry {nextExpiry}
@@ -3782,7 +3995,7 @@ export function App() {
                       <div className="bot-command-card__trade">
                         <div className="bot-command-card__trade-line">
                           <span className="empty-state-icon" aria-hidden="true">
-                            {bot.label === "NIFTY" ? "N" : "S"}
+                            {bot.label.startsWith("NIFTY") ? "N" : "S"}
                           </span>
                           <strong>Active Trade</strong>
                         </div>
@@ -4170,6 +4383,34 @@ export function App() {
           summary: sensexOneMinuteBotSummary,
           showContracts: true,
           botPaperTrading: sensexPaperTrading,
+        })
+      ) : activeView === "niftyFiveMinuteBot" ? (
+        renderBotPage({
+          eyebrow: "NIFTY 5-Minute Option Bot",
+          title: "NIFTY 5m option-contract execution",
+          subtitle:
+            "BUY-only Supertrend strategy matching the 5m backtest, with entry at next candle +2s.",
+          scheduleLabel: "Every 5 min at +2s",
+          strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBot,
+          trades: niftyFiveMinuteOptionTrades,
+          currentActiveTrades: niftyFiveMinuteActiveTrades,
+          summary: niftyFiveMinuteBotSummary,
+          showContracts: true,
+          botPaperTrading: niftyFiveMinutePaperTrading,
+        })
+      ) : activeView === "sensexFiveMinuteBot" ? (
+        renderBotPage({
+          eyebrow: "SENSEX 5-Minute Option Bot",
+          title: "SENSEX 5m option-contract execution",
+          subtitle:
+            "Separate SENSEX lane for the same BUY-only 5m Supertrend strategy.",
+          scheduleLabel: "Every 5 min at +2s",
+          strategyKey: DAILY_SETUP_KEYS.sensexFiveMinuteBot,
+          trades: sensexFiveMinuteOptionTrades,
+          currentActiveTrades: sensexFiveMinuteActiveTrades,
+          summary: sensexFiveMinuteBotSummary,
+          showContracts: true,
+          botPaperTrading: sensexFiveMinutePaperTrading,
         })
       ) : activeView === "trades" ? (
         <section className="section-block">
@@ -5856,7 +6097,7 @@ export function App() {
       ) : activeView === "niftyFiveMinuteBacktest" ? (
         <section className="section-block">
           <div className="section-heading">
-            <p className="eyebrow">NIFTY 5m Backtesting</p>
+            <p className="eyebrow">5m Option Backtesting</p>
             <h2 className="section-title">BUY-only Supertrend option test</h2>
           </div>
 
@@ -5872,11 +6113,40 @@ export function App() {
               onSubmit={runNiftyFiveMinuteBacktest}
             >
               <div className="form-field segmented-field">
+                <span>Instrument</span>
+                <div
+                  className="segmented-toggle"
+                  role="group"
+                  aria-label="5m backtest instrument"
+                >
+                  {["NIFTY", "SENSEX"].map((instrument) => (
+                    <button
+                      key={instrument}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        niftyFiveMinuteBacktestForm.instrument === instrument
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() =>
+                        updateNiftyFiveMinuteBacktestField(
+                          "instrument",
+                          instrument,
+                        )
+                      }
+                    >
+                      {instrument}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="form-field segmented-field">
                 <span>Contract Mode</span>
                 <div
                   className="segmented-toggle"
                   role="group"
-                  aria-label="NIFTY 5m contract mode"
+                  aria-label="5m contract mode"
                 >
                   {[
                     { id: "fixed", label: "Fixed" },
@@ -5907,7 +6177,11 @@ export function App() {
                     <input
                       type="text"
                       value={niftyFiveMinuteBacktestForm.contract1}
-                      placeholder="24000PE"
+                      placeholder={
+                        niftyFiveMinuteBacktestForm.instrument === "SENSEX"
+                          ? "76000PE"
+                          : "24000PE"
+                      }
                       onChange={(event) =>
                         updateNiftyFiveMinuteBacktestField(
                           "contract1",
@@ -5922,7 +6196,11 @@ export function App() {
                     <input
                       type="text"
                       value={niftyFiveMinuteBacktestForm.contract2}
-                      placeholder="24300CE"
+                      placeholder={
+                        niftyFiveMinuteBacktestForm.instrument === "SENSEX"
+                          ? "76200CE"
+                          : "24300CE"
+                      }
                       onChange={(event) =>
                         updateNiftyFiveMinuteBacktestField(
                           "contract2",
@@ -5939,7 +6217,7 @@ export function App() {
                     <div
                       className="segmented-toggle segmented-toggle--three"
                       role="group"
-                      aria-label="NIFTY 5m contract side"
+                      aria-label="5m contract side"
                     >
                       {["PE", "CE", "BOTH"].map((side) => (
                         <button
@@ -5966,7 +6244,11 @@ export function App() {
                     <span>Strike Offset</span>
                     <input
                       type="number"
-                      step="50"
+                      step={
+                        niftyFiveMinuteBacktestForm.instrument === "SENSEX"
+                          ? "100"
+                          : "50"
+                      }
                       value={niftyFiveMinuteBacktestForm.strikeOffset}
                       placeholder="0, 100, -100"
                       onChange={(event) =>
@@ -6121,7 +6403,7 @@ export function App() {
               >
                 {niftyFiveMinuteBacktestLoading
                   ? "Running..."
-                  : "Run NIFTY 5m Backtest"}
+                  : `Run ${niftyFiveMinuteBacktestForm.instrument} 5m Backtest`}
               </button>
             </form>
           </section>
