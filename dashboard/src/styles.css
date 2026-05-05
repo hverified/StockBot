@@ -144,7 +144,7 @@
   );
 }
 :root[data-theme="finance"] {
-  color-scheme: dark;
+  color-scheme: light;
   --bg: #f4f6f8;
   --panel: rgba(255, 255, 255, 0.92);
   --panel-strong: rgba(255, 255, 255, 1);
@@ -946,7 +946,7 @@ th {
 
 .bot-command-card__pnl span {
   color: var(--muted);
-  font-size: 0.74rem;
+  font-size: 0.86rem;
   font-weight: 850;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -954,9 +954,20 @@ th {
 
 .bot-command-card__pnl strong {
   font-family: "IBM Plex Mono", monospace;
-  font-size: clamp(1.6rem, 4vw, 2.45rem);
+  font-size: clamp(2.05rem, 4.6vw, 3.1rem);
   line-height: 1;
   letter-spacing: -0.06em;
+}
+
+.bot-command-card__pnl .pnl-value {
+  font-weight: 750;
+}
+
+.bot-command-card__pnl .pnl-value__pct {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 0.68em;
+  letter-spacing: -0.03em;
 }
 
 .bot-command-card__stats {

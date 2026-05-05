@@ -16,10 +16,10 @@ from pydantic import BaseModel
 
 from nifty_alert_bot.backtesting import (
     BacktestRequest as EngineBacktestRequest,
-    NiftyFiveMinuteBacktestRequest,
+    FiveMinuteOptionBacktestRequest,
     OptionContractBacktestRequest,
     run_backtest,
-    run_nifty_five_minute_backtest,
+    run_five_minute_option_backtest,
     run_option_contract_backtest,
 )
 from nifty_alert_bot.config import get_settings
@@ -147,7 +147,7 @@ class OptionContractBacktestApiRequest(BaseModel):
     exitTime: str
 
 
-class NiftyFiveMinuteBacktestApiRequest(BaseModel):
+class FiveMinuteOptionBacktestApiRequest(BaseModel):
     instrument: Literal["NIFTY", "SENSEX"] = "NIFTY"
     mode: Literal["fixed", "dynamic"] = "fixed"
     contract1: str = ""
@@ -1657,13 +1657,14 @@ def run_option_contract_backtest_api(payload: OptionContractBacktestApiRequest) 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/backtest/option-5m")
 @app.post("/api/backtest/nifty-5m")
-def run_nifty_five_minute_backtest_api(payload: NiftyFiveMinuteBacktestApiRequest) -> dict:
+def run_five_minute_option_backtest_api(payload: FiveMinuteOptionBacktestApiRequest) -> dict:
     settings = get_settings()
     try:
-        return run_nifty_five_minute_backtest(
+        return run_five_minute_option_backtest(
             settings,
-            NiftyFiveMinuteBacktestRequest(
+            FiveMinuteOptionBacktestRequest(
                 instrument=payload.instrument,
                 mode=payload.mode,
                 contract_1=payload.contract1,

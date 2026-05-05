@@ -494,14 +494,6 @@ def build_dual_strategy_settings(settings) -> list[tuple[Any, str]]:
 def build_option_contract_strategy_settings(settings) -> list[tuple[Any, str]]:
     return [
         (
-            option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY),
-            OPTION_CONTRACT_STRATEGY_KEY,
-        ),
-        (
-            option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY),
-            SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
-        ),
-        (
             option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY),
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
         ),
@@ -586,7 +578,7 @@ def run_live(*, force_weekend_runs: bool = False) -> None:
     state = build_state_store(settings)
     run_logs = RunLogStore(settings.run_logs_dir)
     logger.info(
-        "Starting option-contract paper bots for NIFTY/SENSEX 1m and 5m. Schedule: %s to %s IST at each strategy interval +2 seconds.",
+        "Starting option-contract paper bots for NIFTY/SENSEX 5m only. Schedule: %s to %s IST at +2 seconds.",
         settings.schedule_start,
         settings.schedule_end,
     )

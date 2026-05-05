@@ -59,7 +59,7 @@ class OptionContractBacktestRequest:
 
 
 @dataclass(frozen=True)
-class NiftyFiveMinuteBacktestRequest:
+class FiveMinuteOptionBacktestRequest:
     instrument: str
     mode: str
     contract_1: str
@@ -882,7 +882,7 @@ def run_option_contract_backtest(settings, request: OptionContractBacktestReques
         price_provider.close()
 
 
-def run_nifty_five_minute_backtest(settings, request: NiftyFiveMinuteBacktestRequest) -> dict[str, Any]:
+def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestRequest) -> dict[str, Any]:
     start_date = datetime.fromisoformat(request.start_date).date()
     end_date = datetime.fromisoformat(request.end_date).date()
     if end_date < start_date:

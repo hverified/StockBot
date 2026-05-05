@@ -42,15 +42,11 @@ const OPTION_BACKTEST_ENTRY_SIGNALS = [
 ];
 const STRATEGY_FILTER_OPTIONS = [
   { id: "all", label: "All" },
-  { id: "niftyOneMinute", label: "NIFTY 1m" },
-  { id: "sensexOneMinute", label: "SENSEX 1m" },
   { id: "niftyFiveMinute", label: "NIFTY 5m" },
   { id: "sensexFiveMinute", label: "SENSEX 5m" },
 ];
 const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
-  { id: "niftyOneMinuteBot", label: "NIFTY 1m Bot" },
-  { id: "sensexOneMinuteBot", label: "SENSEX 1m Bot" },
   { id: "niftyFiveMinuteBot", label: "NIFTY 5m Bot" },
   { id: "sensexFiveMinuteBot", label: "SENSEX 5m Bot" },
   { id: "trades", label: "Trades" },
@@ -59,7 +55,7 @@ const NAV_OPTIONS = [
   { id: "liveTrading", label: "Live Trading" },
   { id: "broker", label: "Broker" },
   { id: "logs", label: "Logs" },
-  { id: "niftyFiveMinuteBacktest", label: "NIFTY 5m Backtest" },
+  { id: "niftyFiveMinuteBacktest", label: "5m Option Backtest" },
   { id: "optionBacktest", label: "Option Backtest" },
 ];
 // const THEME_OPTIONS = [
@@ -1107,17 +1103,27 @@ export function App() {
   );
   const [tradeStrategyFilter, setTradeStrategyFilter] = useState(() => {
     const saved = window.localStorage.getItem("trade-strategy-filter");
-    return saved === "oneMinute" ? "niftyOneMinute" : (saved ?? "all");
+    return saved === "oneMinute" ||
+      saved === "niftyOneMinute" ||
+      saved === "sensexOneMinute"
+      ? "all"
+      : (saved ?? "all");
   });
   const [reportStrategyFilter, setReportStrategyFilter] = useState(() => {
     const saved = window.localStorage.getItem("report-strategy-filter");
-    return saved === "oneMinute" ? "niftyOneMinute" : (saved ?? "all");
+    return saved === "oneMinute" ||
+      saved === "niftyOneMinute" ||
+      saved === "sensexOneMinute"
+      ? "all"
+      : (saved ?? "all");
   });
   const [logStrategyFilter, setLogStrategyFilter] = useState(() => {
     const saved = window.localStorage.getItem("log-strategy-filter");
-    return saved === "oneMinute"
-      ? "niftyOneMinute"
-      : (saved ?? "niftyOneMinute");
+    return saved === "oneMinute" ||
+      saved === "niftyOneMinute" ||
+      saved === "sensexOneMinute"
+      ? "niftyFiveMinute"
+      : (saved ?? "niftyFiveMinute");
   });
   const [showHourlyPnl, setShowHourlyPnl] = useState(
     () => window.localStorage.getItem("show-hourly-pnl") === "true",
@@ -1962,7 +1968,7 @@ export function App() {
     setError("");
 
     try {
-      const response = await fetch(apiUrl("/api/backtest/nifty-5m"), {
+      const response = await fetch(apiUrl("/api/backtest/option-5m"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1992,7 +1998,7 @@ export function App() {
 
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail ?? `NIFTY 5m backtest failed with ${response.status}`);
+        throw new Error(payload.detail ?? `5m option backtest failed with ${response.status}`);
       }
 
       setNiftyFiveMinuteBacktestResult(await response.json());
@@ -2000,7 +2006,7 @@ export function App() {
       setError(
         backtestError instanceof Error
           ? backtestError.message
-          : "Unable to run NIFTY 5m backtest.",
+          : "Unable to run 5m option backtest.",
       );
     } finally {
       setNiftyFiveMinuteBacktestLoading(false);
@@ -2105,14 +2111,10 @@ export function App() {
   const rawSensexFiveMinuteTradeHistory =
     sensexFiveMinutePaperTrading.tradeHistory ?? [];
   const activeTrades = [
-    ...niftyActiveTrades,
-    ...rawSensexActiveTrades,
     ...rawNiftyFiveMinuteActiveTrades,
     ...rawSensexFiveMinuteActiveTrades,
   ];
   const tradeHistory = [
-    ...niftyTradeHistory,
-    ...rawSensexTradeHistory,
     ...rawNiftyFiveMinuteTradeHistory,
     ...rawSensexFiveMinuteTradeHistory,
   ].sort(
@@ -2158,25 +2160,30 @@ export function App() {
     optionBacktestTrades,
     "total",
   );
-  const isNiftyOneMinuteLog = (log) =>
-    String(log?.strategy_mode ?? "").toLowerCase() === "option_contracts" ||
-    String(log?.strategy_key ?? "").toLowerCase() === "option_contracts_1m" ||
-    String(log?.interval ?? "").toLowerCase() === "1m";
-  const isSensexOneMinuteLog = (log) =>
+  const isNiftyFiveMinuteLog = (log) =>
     String(log?.strategy_key ?? "").toLowerCase() ===
-      "option_contracts_1m_sensex" ||
-    String(log?.underlying ?? "").toUpperCase() === "SENSEX";
+      DAILY_SETUP_KEYS.niftyFiveMinuteBot ||
+    (String(log?.interval ?? "").toLowerCase() === "5m" &&
+      String(log?.underlying ?? "").toUpperCase() !== "SENSEX" &&
+      String(log?.strategy_key ?? "").toLowerCase() !==
+        DAILY_SETUP_KEYS.sensexFiveMinuteBot);
+  const isSensexFiveMinuteLog = (log) =>
+    String(log?.strategy_key ?? "").toLowerCase() ===
+      DAILY_SETUP_KEYS.sensexFiveMinuteBot ||
+    (String(log?.interval ?? "").toLowerCase() === "5m" &&
+      String(log?.underlying ?? "").toUpperCase() === "SENSEX");
+  const fiveMinuteLogs = logs.filter(
+    (log) => isNiftyFiveMinuteLog(log) || isSensexFiveMinuteLog(log),
+  );
   const filteredLogs =
-    logStrategyFilter === "niftyOneMinute"
-      ? logs.filter(
-          (log) => isNiftyOneMinuteLog(log) && !isSensexOneMinuteLog(log),
-        )
-      : logStrategyFilter === "sensexOneMinute"
-        ? logs.filter(isSensexOneMinuteLog)
-        : logs;
+    logStrategyFilter === "niftyFiveMinute"
+      ? logs.filter(isNiftyFiveMinuteLog)
+      : logStrategyFilter === "sensexFiveMinute"
+        ? logs.filter(isSensexFiveMinuteLog)
+        : fiveMinuteLogs;
   const selectedLogFilterMeta =
     STRATEGY_FILTER_OPTIONS.find((option) => option.id === logStrategyFilter) ??
-    STRATEGY_FILTER_OPTIONS[1];
+    STRATEGY_FILTER_OPTIONS[0];
   const logCounts = filteredLogs.reduce(
     (counts, log) => {
       const statusValue = String(log.status ?? "unknown").toLowerCase();
@@ -2233,11 +2240,11 @@ export function App() {
   };
   const latestNiftyTrendLog = getLatestTrendSnapshot(
     logs,
-    (log) => isNiftyOneMinuteLog(log) && !isSensexOneMinuteLog(log),
+    isNiftyFiveMinuteLog,
   );
   const latestSensexTrendLog = getLatestTrendSnapshot(
     logs,
-    isSensexOneMinuteLog,
+    isSensexFiveMinuteLog,
   );
   const combinedOpenTrade = activeTrades[0] ?? null;
   const openTradeLabel = combinedOpenTrade ? (
@@ -2370,28 +2377,6 @@ export function App() {
     sensexFiveMinuteActiveTrades,
   );
   const overviewBotCards = [
-    {
-      label: "NIFTY",
-      strategyKey: DAILY_SETUP_KEYS.niftyOneMinuteBot,
-      paperTrading: niftyPaperTrading,
-      activeTrades: oneMinuteActiveTrades,
-      summary: oneMinuteBotSummary,
-      trendLog: latestNiftyTrendLog,
-      setup:
-        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.niftyOneMinuteBot] ??
-        {},
-    },
-    {
-      label: "SENSEX",
-      strategyKey: DAILY_SETUP_KEYS.sensexOneMinuteBot,
-      paperTrading: sensexPaperTrading,
-      activeTrades: sensexOneMinuteActiveTrades,
-      summary: sensexOneMinuteBotSummary,
-      trendLog: latestSensexTrendLog,
-      setup:
-        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.sensexOneMinuteBot] ??
-        {},
-    },
     {
       label: "NIFTY 5m",
       strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBot,
@@ -3535,14 +3520,10 @@ export function App() {
           <strong>
             {activeView === "overview"
               ? streamStatus
-              : activeView === "niftyOneMinuteBot"
-                ? "NIFTY 1m"
-                : activeView === "sensexOneMinuteBot"
-                  ? "SENSEX 1m"
-                  : activeView === "niftyFiveMinuteBot"
-                    ? "NIFTY 5m"
-                    : activeView === "sensexFiveMinuteBot"
-                      ? "SENSEX 5m"
+              : activeView === "niftyFiveMinuteBot"
+                ? "NIFTY 5m"
+                : activeView === "sensexFiveMinuteBot"
+                  ? "SENSEX 5m"
                   : activeView === "trades"
                     ? `${formatCount(tradeHistory.length)} trades`
                     : activeView === "signals"
@@ -5299,14 +5280,6 @@ export function App() {
                   <dt>Last Session Update</dt>
                   <dd>{formatDateTime(zerodha.session?.updatedAt)}</dd>
                 </div>
-                <div>
-                  <dt>Last User</dt>
-                  <dd>
-                    {zerodha.session?.userName ??
-                      zerodha.session?.userId ??
-                      "Not available"}
-                  </dd>
-                </div>
               </dl>
             </article>
 
@@ -6500,7 +6473,10 @@ export function App() {
               <section className="panel">
                 <div className="panel-header">
                   <div>
-                    <p className="panel-title">NIFTY 5m Backtest Trades</p>
+                    <p className="panel-title">
+                      {niftyFiveMinuteBacktestResult.data?.underlying ?? "Option"}{" "}
+                      5m Backtest Trades
+                    </p>
                   </div>
                 </div>
                 {niftyFiveMinuteBacktestTrades.length ? (
@@ -6569,7 +6545,11 @@ export function App() {
               <section className="panel">
                 <div className="panel-header">
                   <div>
-                    <p className="panel-title">Skipped NIFTY 5m Signals</p>
+                    <p className="panel-title">
+                      Skipped{" "}
+                      {niftyFiveMinuteBacktestResult.data?.underlying ?? "Option"}{" "}
+                      5m Signals
+                    </p>
                   </div>
                 </div>
                 {niftyFiveMinuteBacktestSkipped.length ? (
