@@ -390,7 +390,7 @@ export function buildOptionTypeReport(trades, rangeId = "total") {
 }
 
 export function getStatusTone(status) {
-  if (status === "alert_sent" || status === "sample_alert_sent") return "good";
+  if (status === "entry" || status === "alert_sent" || status === "sample_alert_sent") return "good";
   if (status === "error") return "bad";
   if (status === "duplicate") return "warn";
   if (status === "skipped") return "warn";

@@ -248,10 +248,11 @@ def _format_trade_exit_message(trade: dict[str, Any], *, exit_reason: str, exit_
 
 
 class PaperTradingEngine:
-    def __init__(self, settings, state_store, *, state_key: str | None = None) -> None:
+    def __init__(self, settings, state_store, *, state_key: str | None = None, entry_event_callback=None) -> None:
         self.settings = settings
         self.state_store = state_store
         self.state_key = state_key
+        self.entry_event_callback = entry_event_callback
         self.price_provider = OptionPriceProvider(settings)
         self.paper_trade_repository = PaperTradeRepository(
             settings.mongodb_uri,
@@ -1050,7 +1051,7 @@ class PaperTradingEngine:
             expiry=str(trade.get("expiry") or ""),
         )
 
-    def _trend_flip_exit(self, trade: dict[str, Any], now: datetime) -> tuple[float, datetime] | None:
+    def _latest_trade_trend_row(self, trade: dict[str, Any], now: datetime) -> tuple[Any, pd.Series] | None:
         if trade.get("strategy_mode") != "option_contracts":
             return None
 
@@ -1067,6 +1068,20 @@ class PaperTradingEngine:
         entry_candle_time = trade.get("entry_signal_candle_time")
         if entry_candle_time and latest_closed.name <= pd.Timestamp(entry_candle_time):
             return None
+
+        return contract, latest_closed
+
+    def _trend_flip_exit(
+        self,
+        trade: dict[str, Any],
+        now: datetime,
+        latest_closed: pd.Series | None = None,
+    ) -> tuple[float, datetime] | None:
+        if latest_closed is None:
+            latest_trend = self._latest_trade_trend_row(trade, now)
+            if latest_trend is None:
+                return None
+            _, latest_closed = latest_trend
 
         current_trend = int(latest_closed.get("st_10_1_trend"))
         entry_trend = int(trade.get("entry_signal_trend") or 1)
@@ -1486,6 +1501,23 @@ class PaperTradingEngine:
             entry_time,
         )
 
+        if self.entry_event_callback is not None:
+            try:
+                self.entry_event_callback(
+                    CycleResult(
+                        "entry",
+                        "Paper trade entered and monitoring started.",
+                        closed_candle,
+                        details={
+                            **trade.copy(),
+                            "contract_signals": contract_details,
+                        },
+                        alert_sent=True,
+                    )
+                )
+            except Exception:
+                logger.exception("Failed to record paper trade entry run event.")
+
         return self._monitor_trade(trade, paper_state, notifier, resumed=False)
 
     def _monitor_trade(self, trade: dict[str, Any], paper_state: dict[str, Any], notifier, *, resumed: bool) -> CycleResult:
@@ -1555,7 +1587,30 @@ class PaperTradingEngine:
                     should_check_trend = False
 
                 if should_check_trend:
-                    trend_exit = self._trend_flip_exit(trade, now)
+                    latest_trend = self._latest_trade_trend_row(trade, now)
+                    trend_exit = None
+                    if latest_trend is not None:
+                        contract, latest_closed = latest_trend
+                        if self.entry_event_callback is not None:
+                            try:
+                                self.entry_event_callback(
+                                    CycleResult(
+                                        "trend_update",
+                                        "Latest active-trade trend snapshot.",
+                                        latest_closed,
+                                        details={
+                                            "strategy_mode": "option_contracts",
+                                            "strategy_key": self.state_key,
+                                            "option_symbol": contract.tradingsymbol,
+                                            "active_trade_id": trade.get("trade_id"),
+                                            "active_trade_signal": trade.get("signal"),
+                                            "active_trade_status": trade.get("status"),
+                                        },
+                                    )
+                                )
+                            except Exception:
+                                logger.exception("Failed to record active trade trend run event.")
+                        trend_exit = self._trend_flip_exit(trade, now, latest_closed)
                     if trend_exit is not None:
                         exit_price_reference, exit_timestamp = trend_exit
                         exit_reason = "SUPER_TREND_FLIP"

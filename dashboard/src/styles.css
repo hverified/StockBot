@@ -2599,6 +2599,14 @@ td {
   line-height: 1.22;
 }
 
+.highlight-row {
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+
+.highlight-row:hover {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
 .column-picker {
   position: relative;
 }

@@ -49,6 +49,7 @@ import {
   getPnlTone,
   getStatusTone,
   getTodayInIst,
+  getTradePnl,
   loadSelectedColumns,
   parseIstDate,
   PaginationControls,
@@ -1154,6 +1155,8 @@ export function App() {
     niftyFiveMinuteBacktestResult?.trades ?? [];
   const niftyFiveMinuteBacktestSkipped =
     niftyFiveMinuteBacktestResult?.skipped ?? [];
+  const niftyFiveMinuteBacktestStRows =
+    niftyFiveMinuteBacktestResult?.data?.stValueRows ?? [];
   const niftyFiveMinuteHourlyPnlReport = buildHourlyPnlReport(
     niftyFiveMinuteBacktestTrades,
     "total",
@@ -5603,6 +5606,71 @@ export function App() {
                         <strong>{formatCount(count)}</strong>
                       </div>
                     ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {niftyFiveMinuteBacktestStRows.length ? (
+                <section className="panel">
+                  <div className="panel-header">
+                    <div>
+                      <p className="panel-title">
+                        {niftyFiveMinuteBacktestResult.data?.underlying ?? "Option"}{" "}
+                        5m Supertrend Values
+                      </p>
+                    </div>
+                  </div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Time</th>
+                          <th>Contract</th>
+                          <th>O / H / L / C</th>
+                          <th>Body %</th>
+                          <th>ST 10,1</th>
+                          <th>ST 10,3</th>
+                          <th>Signal</th>
+                          <th>Body OK</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {niftyFiveMinuteBacktestStRows.map((row, index) => (
+                          <tr
+                            key={`${row.optionSymbol}-${row.candleTime}-${index}`}
+                            className={row.isBuySignal ? "highlight-row" : ""}
+                          >
+                            <td>{formatTimeOnly(row.candleTime)}</td>
+                            <td>{formatCompactOptionSymbol(row.optionSymbol)}</td>
+                            <td>
+                              {formatCurrency(row.open)} / {formatCurrency(row.high)} /{" "}
+                              {formatCurrency(row.low)} / {formatCurrency(row.close)}
+                            </td>
+                            <td>{formatNumber(row.bodyPct)}%</td>
+                            <td>
+                              {formatNumber(row.st10_1)}{" "}
+                              <TrendBadge value={row.st10_1Trend} />
+                            </td>
+                            <td>
+                              {formatNumber(row.st10_3)}{" "}
+                              <TrendBadge value={row.st10_3Trend} />
+                            </td>
+                            <td>{row.signal ? formatSignal(row.signal) : "-"}</td>
+                            <td>
+                              {row.isBuySignal ? (
+                                <span
+                                  className={`status-pill status-pill--${row.bodyAccepted ? "good" : "warn"}`}
+                                >
+                                  {row.bodyAccepted ? "Yes" : "No"}
+                                </span>
+                              ) : (
+                                "-"
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </section>
               ) : null}

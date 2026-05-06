@@ -319,6 +319,7 @@ def _fetch_backtest_candles(
 ) -> tuple[pd.DataFrame, str]:
     from_dt = datetime.combine(start_date, time.min, tzinfo=settings.timezone)
     to_dt = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=settings.timezone)
+    use_cache = end_date < datetime.now(settings.timezone).date()
 
     zerodha_frame = _option_candles_to_frame(
         price_provider.historical_index_candles(
@@ -326,7 +327,7 @@ def _fetch_backtest_candles(
             from_dt,
             to_dt,
             interval,
-            use_cache=True,
+            use_cache=use_cache,
         ),
         settings.timezone,
     )
@@ -901,11 +902,14 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
     signal_interval = "5m"
     signal_interval_minutes = 5
     max_historical_expiry_gap_days = 7
-    warmup_start_date = start_date - timedelta(days=10)
+    # Match the live 5m option bot, which rebuilds Supertrend from the last 5 days
+    # of option candles on every scan. A different warmup can shift crossover points.
+    warmup_start_date = start_date - timedelta(days=5)
     from_dt = datetime.combine(warmup_start_date, time.min, tzinfo=settings.timezone)
     to_dt = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=settings.timezone)
     trade_from_dt = datetime.combine(start_date, time.min, tzinfo=settings.timezone)
     trade_to_dt = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=settings.timezone)
+    use_candle_cache = end_date < datetime.now(settings.timezone).date()
     price_provider = OptionPriceProvider(settings)
 
     try:
@@ -981,6 +985,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
         signal_events: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         signal_diagnostics: list[dict[str, Any]] = []
+        st_value_rows: list[dict[str, Any]] = []
         raw_buy_signal_count = 0
         body_accepted_signal_count = 0
         for spec in contract_specs:
@@ -991,7 +996,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     from_dt,
                     to_dt,
                     interval="5minute",
-                    use_cache=True,
+                    use_cache=use_candle_cache,
                 ),
                 settings.timezone,
             )
@@ -1016,6 +1021,43 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "signal_frame": signal_frame,
             }
             contract_contexts.append(context)
+
+            if start_date == end_date:
+                for st_index, st_row in signal_frame.iterrows():
+                    candle_time = _as_ist(st_index, settings.timezone)
+                    if candle_time.date() != start_date:
+                        continue
+                    signal_value = st_row.get("signal")
+                    signal_value = None if pd.isna(signal_value) else str(signal_value).upper()
+                    signal_open = round(float(st_row["Open"]), 2)
+                    signal_close = round(float(st_row["Close"]), 2)
+                    body_pct = (
+                        round((abs(signal_close - signal_open) / signal_open) * 100.0, 2)
+                        if signal_open > 0
+                        else None
+                    )
+                    st_value_rows.append(
+                        {
+                            "candleTime": candle_time.isoformat(),
+                            "optionSymbol": contract.tradingsymbol,
+                            "open": signal_open,
+                            "high": round(float(st_row["High"]), 2),
+                            "low": round(float(st_row["Low"]), 2),
+                            "close": signal_close,
+                            "bodyPct": body_pct,
+                            "st10_1": round(float(st_row["st_10_1"]), 2),
+                            "st10_3": round(float(st_row["st_10_3"]), 2),
+                            "st10_1Trend": int(st_row.get("st_10_1_trend") or 0),
+                            "st10_3Trend": int(st_row.get("st_10_3_trend") or 0),
+                            "signal": signal_value,
+                            "isBuySignal": signal_value == "BUY",
+                            "bodyAccepted": (
+                                signal_value == "BUY"
+                                and body_pct is not None
+                                and request.min_body_pct <= body_pct <= request.max_body_pct
+                            ),
+                        }
+                    )
 
             for index in range(1, len(signal_frame)):
                 row = signal_frame.iloc[index]
@@ -1256,6 +1298,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "minBodyPct": request.min_body_pct,
                 "rawBuySignalCount": raw_buy_signal_count,
                 "bodyAcceptedSignalCount": body_accepted_signal_count,
+                "stValueRows": st_value_rows,
                 "executedTradeCount": len(trades),
                 "skippedCount": len(skipped),
                 "skippedReasonCounts": skipped_reason_counts,

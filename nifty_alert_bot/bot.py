@@ -324,7 +324,30 @@ def process_once(
         return
 
     closed_candle = None
-    engine = PaperTradingEngine(settings, state, state_key=state_key)
+    def record_entry_event(entry_result) -> None:
+        record_run_event(
+            state,
+            run_logs,
+            datetime.now(settings.timezone),
+            ", ".join(settings.option_contracts) or settings.symbol,
+            settings.option_contract_interval,
+            entry_result.status,
+            entry_result.message,
+            entry_result.row,
+            alert_sent=entry_result.alert_sent,
+            details={
+                **(entry_result.details or {}),
+                "strategy_key": state_key,
+                "strategy_mode": settings.strategy_mode,
+            },
+        )
+
+    engine = PaperTradingEngine(
+        settings,
+        state,
+        state_key=state_key,
+        entry_event_callback=record_entry_event if settings.strategy_mode == "option_contracts" else None,
+    )
     try:
         resumed_trade = engine.resume_active_trade_if_any(notifier, now_ist)
         if resumed_trade is not None:
