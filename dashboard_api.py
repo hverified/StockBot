@@ -1036,16 +1036,44 @@ def _load_dashboard_payload() -> dict:
         state_store.close()
     now = datetime.now(settings.timezone)
     trade_date = now.date().isoformat()
-    daily_contracts = nifty_daily_contracts
-    option_schedule_start = (nifty_daily_contracts or {}).get("schedule_start") or settings.schedule_start
-    option_schedule_end = (nifty_daily_contracts or {}).get("schedule_end") or settings.schedule_end
-    next_run = next_run_at(
-        now,
-        option_schedule_start,
-        option_schedule_end,
-        settings.schedule_interval_minutes,
-        settings.schedule_buffer_seconds,
-        include_weekends=settings.force_weekend_runs,
+    daily_contracts = nifty_five_minute_daily_contracts or nifty_daily_contracts
+    nifty_one_minute_schedule_start = (nifty_daily_contracts or {}).get("schedule_start") or nifty_settings.schedule_start
+    nifty_one_minute_schedule_end = (nifty_daily_contracts or {}).get("schedule_end") or nifty_settings.schedule_end
+    active_schedules = [
+        (
+            NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+            nifty_five_minute_settings,
+            nifty_five_minute_daily_contracts,
+        ),
+        (
+            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+            sensex_five_minute_settings,
+            sensex_five_minute_daily_contracts,
+        ),
+    ]
+    active_next_runs = []
+    for strategy_key, strategy_settings, strategy_daily_setup in active_schedules:
+        schedule_start = (strategy_daily_setup or {}).get("schedule_start") or strategy_settings.schedule_start
+        schedule_end = (strategy_daily_setup or {}).get("schedule_end") or strategy_settings.schedule_end
+        active_next_runs.append(
+            (
+                next_run_at(
+                    now,
+                    schedule_start,
+                    schedule_end,
+                    strategy_settings.schedule_interval_minutes,
+                    strategy_settings.schedule_buffer_seconds,
+                    include_weekends=strategy_settings.force_weekend_runs,
+                ),
+                strategy_key,
+                strategy_settings,
+                schedule_start,
+                schedule_end,
+            )
+        )
+    next_run, next_run_strategy_key, next_run_settings, option_schedule_start, option_schedule_end = min(
+        active_next_runs,
+        key=lambda item: item[0],
     )
 
     return {
@@ -1054,12 +1082,13 @@ def _load_dashboard_payload() -> dict:
         "interval": settings.interval,
         "schedule": {
             "timezone": settings.timezone_name,
-            "start": (daily_contracts or {}).get("schedule_start") or settings.schedule_start,
-            "end": (daily_contracts or {}).get("schedule_end") or settings.schedule_end,
-            "intervalMinutes": settings.schedule_interval_minutes,
-            "bufferSeconds": settings.schedule_buffer_seconds,
+            "start": option_schedule_start,
+            "end": option_schedule_end,
+            "intervalMinutes": next_run_settings.schedule_interval_minutes,
+            "bufferSeconds": next_run_settings.schedule_buffer_seconds,
             "forceWeekendRuns": settings.force_weekend_runs,
             "nextRunAt": next_run.isoformat(),
+            "sourceStrategy": next_run_strategy_key,
         },
         "strategyConfig": {
             "mode": settings.strategy_mode,
@@ -1090,8 +1119,8 @@ def _load_dashboard_payload() -> dict:
                     trade_date=trade_date,
                     daily_setup=nifty_daily_contracts,
                     settings=nifty_settings,
-                    schedule_start=option_schedule_start,
-                    schedule_end=option_schedule_end,
+                    schedule_start=nifty_one_minute_schedule_start,
+                    schedule_end=nifty_one_minute_schedule_end,
                     target_pct=nifty_settings.option_contract_target_pct,
                     include_env_contracts=True,
                 ),
