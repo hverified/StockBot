@@ -743,6 +743,26 @@ export function App() {
       const payload = await response.json();
       setActionMessage(payload.message ?? "Paper balance updated.");
       setAddMoneyAmounts((current) => ({ ...current, [strategyKey]: "" }));
+      setData((current) => {
+        if (!current) return current;
+        const strategyPayload =
+          current.paperTradingByStrategy?.[strategyKey] ?? {};
+        return {
+          ...current,
+          paperTradingByStrategy: {
+            ...(current.paperTradingByStrategy ?? {}),
+            [strategyKey]: {
+              ...strategyPayload,
+              cashBalance: payload.cashBalance,
+              startingBalance: payload.startingBalance,
+              balanceAdjustments:
+                payload.balanceAdjustments ??
+                strategyPayload.balanceAdjustments ??
+                [],
+            },
+          },
+        };
+      });
       const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
       if (dashboardResponse.ok) setData(await dashboardResponse.json());
     } catch (balanceError) {
@@ -995,7 +1015,7 @@ export function App() {
           maxBodyPct: Number(niftyFiveMinuteBacktestForm.maxBodyPct),
           minBodyPct: Number(niftyFiveMinuteBacktestForm.minBodyPct),
           stopLossPct: Number(niftyFiveMinuteBacktestForm.stopLossPct),
-          strikeOffset: Number(niftyFiveMinuteBacktestForm.strikeOffset),
+          strikeOffset: niftyFiveMinuteBacktestForm.strikeOffset,
           entryTime: niftyFiveMinuteBacktestForm.entryTime,
           exitTime: niftyFiveMinuteBacktestForm.exitTime,
         }),
@@ -1155,8 +1175,6 @@ export function App() {
     niftyFiveMinuteBacktestResult?.trades ?? [];
   const niftyFiveMinuteBacktestSkipped =
     niftyFiveMinuteBacktestResult?.skipped ?? [];
-  const niftyFiveMinuteBacktestStRows =
-    niftyFiveMinuteBacktestResult?.data?.stValueRows ?? [];
   const niftyFiveMinuteHourlyPnlReport = buildHourlyPnlReport(
     niftyFiveMinuteBacktestTrades,
     "total",
@@ -1413,6 +1431,24 @@ export function App() {
       setup:
         strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.sensexFiveMinuteBot] ??
         {},
+    },
+  ];
+  const balanceCards = [
+    {
+      label: "NIFTY Bank Balance",
+      shortLabel: "N",
+      strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBot,
+      paperTrading: niftyFiveMinutePaperTrading,
+      activeTrades: niftyFiveMinuteActiveTrades,
+      summary: niftyFiveMinuteBotSummary,
+    },
+    {
+      label: "SENSEX Bank Balance",
+      shortLabel: "S",
+      strategyKey: DAILY_SETUP_KEYS.sensexFiveMinuteBot,
+      paperTrading: sensexFiveMinutePaperTrading,
+      activeTrades: sensexFiveMinuteActiveTrades,
+      summary: sensexFiveMinuteBotSummary,
     },
   ];
   const signalAlertColumns = [
@@ -3464,6 +3500,158 @@ export function App() {
           showContracts: true,
           botPaperTrading: sensexFiveMinutePaperTrading,
         })
+      ) : activeView === "balance" ? (
+        <section className="section-block">
+          <div className="section-heading">
+            <p className="eyebrow">Paper Trading</p>
+            <h2 className="section-title">Balance</h2>
+          </div>
+
+          <section className="balance-card-grid">
+            {balanceCards.map((card) => {
+              const paperBalance = Number(
+                card.paperTrading.cashBalance ?? card.paperTrading.capitalBase ?? 0,
+              );
+              const startingBalance = Number(
+                card.paperTrading.startingBalance ??
+                  card.paperTrading.capitalBase ??
+                  0,
+              );
+              const activeCapital = card.activeTrades.reduce(
+                (sum, trade) => sum + Number(trade.capital_used ?? trade.capitalUsed ?? 0),
+                0,
+              );
+              const adjustments = Array.isArray(card.paperTrading.balanceAdjustments)
+                ? card.paperTrading.balanceAdjustments
+                : [];
+              const addMoneyAmount = addMoneyAmounts[card.strategyKey] ?? "";
+              return (
+                <article
+                  className={`panel bot-command-card bot-command-card--${getPnlTone(card.summary.runningPnl)}`}
+                  key={card.strategyKey}
+                >
+                  <div className="bot-command-card__top">
+                    <div>
+                      <p className="eyebrow">Separate Paper Bank</p>
+                      <h2>{card.label}</h2>
+                    </div>
+                    <span className="empty-state-icon" aria-hidden="true">
+                      {card.shortLabel}
+                    </span>
+                  </div>
+
+                  <div className="balance-card__body">
+                    <div className="balance-hero">
+                      <span>Cash Balance</span>
+                      <strong>{formatCurrency(paperBalance)}</strong>
+                      <div className="balance-hero__meta">
+                        <span>Start {formatCurrency(startingBalance)}</span>
+                        <span>Active {formatCurrency(activeCapital)}</span>
+                      </div>
+                    </div>
+
+                    <dl className="balance-metric-list">
+                      <div className="balance-metric balance-metric--wide">
+                        <dt>Running PnL</dt>
+                        <dd>
+                          <PnlValue
+                            value={card.summary.runningPnl}
+                            baseValue={card.paperTrading.capitalBase}
+                          />
+                        </dd>
+                      </div>
+                      <div className="balance-metric">
+                        <dt>Realized PnL</dt>
+                        <dd>
+                          <PnlValue
+                            value={card.summary.realizedPnl}
+                            baseValue={card.paperTrading.capitalBase}
+                          />
+                        </dd>
+                      </div>
+                      <div className="balance-metric">
+                        <dt>Unrealized PnL</dt>
+                        <dd>
+                          <PnlValue
+                            value={card.summary.unrealizedPnl}
+                            baseValue={card.paperTrading.capitalBase}
+                          />
+                        </dd>
+                      </div>
+                      <div className="balance-metric">
+                        <dt>Trades</dt>
+                        <dd>{formatCount(card.summary.tradeCount)}</dd>
+                      </div>
+                      <div className="balance-metric">
+                        <dt>Wins / Losses</dt>
+                        <dd>
+                          {formatCount(card.summary.winCount)} /{" "}
+                          {formatCount(card.summary.lossCount)}
+                        </dd>
+                      </div>
+                      <div className="balance-metric">
+                        <dt>Open Trades</dt>
+                        <dd>{formatCount(card.activeTrades.length)}</dd>
+                      </div>
+                    </dl>
+                  </div>
+
+                  <div className="bot-command-card__footer balance-card__footer">
+                    <form
+                      className="bot-command-card__money-form"
+                      onSubmit={(event) => addPaperBalance(event, card.strategyKey)}
+                    >
+                      <label className="form-field">
+                        Add Money
+                        <input
+                          type="number"
+                          min="1"
+                          value={addMoneyAmount}
+                          onChange={(event) =>
+                            setAddMoneyAmounts((current) => ({
+                              ...current,
+                              [card.strategyKey]: event.target.value,
+                            }))
+                          }
+                          placeholder="10000"
+                        />
+                      </label>
+                      <button type="submit" className="action-button">
+                        Add
+                      </button>
+                    </form>
+
+                    <details className="balance-adjustments">
+                      <summary>
+                        <span>Recent Adjustments</span>
+                        <strong>{formatCount(adjustments.length)}</strong>
+                      </summary>
+                      {adjustments.length ? (
+                        <div className="mini-ledger">
+                          {adjustments.slice(0, 3).map((adjustment, index) => (
+                            <div
+                              className="mini-ledger__row"
+                              key={`${adjustment.timestamp ?? index}-${index}`}
+                            >
+                              <span>{formatSnakeLabel(adjustment.type ?? "deposit")}</span>
+                              <strong>{formatCurrency(adjustment.amount)}</strong>
+                              <small>
+                                {formatTableDateTime(adjustment.timestamp)} ·{" "}
+                                {formatCurrency(adjustment.balance_after)}
+                              </small>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="muted-cell">No balance adjustments yet</span>
+                      )}
+                    </details>
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        </section>
       ) : activeView === "trades" ? (
         <section className="section-block">
           <div className="section-heading">
@@ -4303,7 +4491,7 @@ export function App() {
             <article className="panel">
               <div className="panel-header">
                 <div>
-                  <p className="panel-title">Connection Status</p>
+                  <p className="panel-title">Zerodha Connection</p>
                 </div>
               </div>
 
@@ -5531,15 +5719,28 @@ export function App() {
                   )}
                 />
                 <MetricCard
-                  label="BUY Signals"
+                  label="Both Green Candles"
                   value={formatCount(
-                    niftyFiveMinuteBacktestResult.data?.rawBuySignalCount,
+                    niftyFiveMinuteBacktestResult.data?.bothGreenCandleCount,
+                  )}
+                />
+                <MetricCard
+                  label="Fresh BUY Arrows"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data?.freshBuyArrowCount ??
+                      niftyFiveMinuteBacktestResult.data?.rawBuySignalCount,
                   )}
                 />
                 <MetricCard
                   label="Body Accepted"
                   value={formatCount(
                     niftyFiveMinuteBacktestResult.data?.bodyAcceptedSignalCount,
+                  )}
+                />
+                <MetricCard
+                  label="Body Rejected"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data?.bodyRejectedSignalCount,
                   )}
                 />
                 <MetricCard
@@ -5606,71 +5807,6 @@ export function App() {
                         <strong>{formatCount(count)}</strong>
                       </div>
                     ))}
-                  </div>
-                </section>
-              ) : null}
-
-              {niftyFiveMinuteBacktestStRows.length ? (
-                <section className="panel">
-                  <div className="panel-header">
-                    <div>
-                      <p className="panel-title">
-                        {niftyFiveMinuteBacktestResult.data?.underlying ?? "Option"}{" "}
-                        5m Supertrend Values
-                      </p>
-                    </div>
-                  </div>
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Time</th>
-                          <th>Contract</th>
-                          <th>O / H / L / C</th>
-                          <th>Body %</th>
-                          <th>ST 10,1</th>
-                          <th>ST 10,3</th>
-                          <th>Signal</th>
-                          <th>Body OK</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {niftyFiveMinuteBacktestStRows.map((row, index) => (
-                          <tr
-                            key={`${row.optionSymbol}-${row.candleTime}-${index}`}
-                            className={row.isBuySignal ? "highlight-row" : ""}
-                          >
-                            <td>{formatTimeOnly(row.candleTime)}</td>
-                            <td>{formatCompactOptionSymbol(row.optionSymbol)}</td>
-                            <td>
-                              {formatCurrency(row.open)} / {formatCurrency(row.high)} /{" "}
-                              {formatCurrency(row.low)} / {formatCurrency(row.close)}
-                            </td>
-                            <td>{formatNumber(row.bodyPct)}%</td>
-                            <td>
-                              {formatNumber(row.st10_1)}{" "}
-                              <TrendBadge value={row.st10_1Trend} />
-                            </td>
-                            <td>
-                              {formatNumber(row.st10_3)}{" "}
-                              <TrendBadge value={row.st10_3Trend} />
-                            </td>
-                            <td>{row.signal ? formatSignal(row.signal) : "-"}</td>
-                            <td>
-                              {row.isBuySignal ? (
-                                <span
-                                  className={`status-pill status-pill--${row.bodyAccepted ? "good" : "warn"}`}
-                                >
-                                  {row.bodyAccepted ? "Yes" : "No"}
-                                </span>
-                              ) : (
-                                "-"
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
                   </div>
                 </section>
               ) : null}

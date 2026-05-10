@@ -4,17 +4,23 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from math import floor
+import logging
+import re
 from typing import Any
 
 import pandas as pd
 
 from nifty_alert_bot.config import interval_to_minutes, kite_interval
 from nifty_alert_bot.data import fetch_candles_between
+from nifty_alert_bot.exact_candle_repository import ExactCandleRepository
 from nifty_alert_bot.indicators import build_signal_frame
 from nifty_alert_bot.instruments import get_instrument_spec
-from nifty_alert_bot.option_price_provider import OptionPriceProvider, synthetic_option_price
+from nifty_alert_bot.option_price_provider import OptionContract, OptionPriceProvider, synthetic_option_price
 from nifty_alert_bot.paper_trading import _apply_entry_slippage, _apply_exit_slippage, _estimate_charges
 from nifty_alert_bot.scheduler import parse_hhmm
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,7 @@ def _dynamic_contract_specs(
     option_exchange: str,
     option_underlying: str,
     max_expiry_gap_days: int | None = None,
+    allow_cached: bool = True,
 ) -> list[dict[str, Any]]:
     option_side = str(contract_input or "").strip().upper()
     if spot_frame.empty:
@@ -175,6 +182,7 @@ def _dynamic_contract_specs(
             exchange=option_exchange,
             underlying=option_underlying,
             max_expiry_gap_days=max_expiry_gap_days,
+            allow_cached=allow_cached,
         )
         if contract is None:
             continue
@@ -275,6 +283,8 @@ def _option_candles_to_frame(candles: list[dict[str, Any]], timezone) -> pd.Data
             "low": "Low",
             "close": "Close",
             "volume": "Volume",
+            "strike": "Strike",
+            "spot": "Spot",
         }
     )
     frame.index = pd.to_datetime(frame["date"])
@@ -285,6 +295,10 @@ def _option_candles_to_frame(candles: list[dict[str, Any]], timezone) -> pd.Data
     columns = ["Open", "High", "Low", "Close"]
     if "Volume" in frame.columns:
         columns.append("Volume")
+    if "Strike" in frame.columns:
+        columns.append("Strike")
+    if "Spot" in frame.columns:
+        columns.append("Spot")
     return frame[columns].dropna()
 
 
@@ -300,6 +314,46 @@ def _add_intraday_vwap(frame: pd.DataFrame) -> pd.DataFrame:
     cumulative_volume = volume.groupby(session).cumsum()
     output["VWAP"] = cumulative_pv / cumulative_volume.replace(0, pd.NA)
     return output
+
+
+def _resample_to_five_minute(frame: pd.DataFrame, timezone) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    working = frame.copy()
+    if working.index.tz is None:
+        working.index = working.index.tz_localize(timezone)
+    else:
+        working.index = working.index.tz_convert(timezone)
+
+    aggregations: dict[str, str] = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+    }
+    if "Volume" in working.columns:
+        aggregations["Volume"] = "sum"
+    if "Strike" in working.columns:
+        aggregations["Strike"] = "last"
+    if "Spot" in working.columns:
+        aggregations["Spot"] = "last"
+
+    pieces = []
+    for _session_date, session_rows in working.groupby(working.index.date):
+        session_start = session_rows.index[0].replace(hour=9, minute=15, second=0, microsecond=0)
+        pieces.append(
+            session_rows.resample(
+                "5min",
+                origin=session_start,
+                label="left",
+                closed="left",
+            ).agg(aggregations)
+        )
+
+    if not pieces:
+        return pd.DataFrame()
+    return pd.concat(pieces).dropna(subset=["Open", "High", "Low", "Close"]).sort_index()
 
 
 def _candle_at_or_after(frame: pd.DataFrame, value: datetime) -> tuple[datetime, pd.Series] | None:
@@ -344,6 +398,73 @@ def _fetch_backtest_candles(
         ),
         "yfinance",
     )
+
+
+def _stored_option_frame(
+    settings,
+    repository: ExactCandleRepository,
+    underlying: str,
+    tradingsymbol: str,
+    from_dt: datetime,
+    to_dt: datetime,
+) -> pd.DataFrame:
+    minute_frame = _option_candles_to_frame(
+        repository.load_candles(
+            underlying=underlying,
+            tradingsymbol=tradingsymbol,
+            interval="minute",
+            from_dt=from_dt,
+            to_dt=to_dt,
+        ),
+        settings.timezone,
+    )
+    return _resample_to_five_minute(minute_frame, settings.timezone)
+
+
+def _stored_contract_specs(
+    repository: ExactCandleRepository,
+    underlying: str,
+    option_type: str | None,
+    from_dt: datetime,
+    to_dt: datetime,
+    order: int,
+    input_value: str,
+    strike: int | None = None,
+    strike_offset: int | None = None,
+) -> list[dict[str, Any]]:
+    contracts = repository.list_contracts(
+        underlying=underlying,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        option_type=option_type,
+        strike=strike,
+        strike_offset=strike_offset,
+        interval="minute",
+    )
+    specs: list[dict[str, Any]] = []
+    for item in contracts:
+        contract = OptionContract(
+            exchange=str(item.get("exchange") or ""),
+            tradingsymbol=str(item.get("tradingsymbol") or ""),
+            instrument_token=int(item.get("instrument_token") or 0),
+            strike=int(item.get("strike") or 0),
+            option_type=str(item.get("option_type") or option_type or "").upper(),
+            expiry=str(item.get("expiry") or ""),
+        )
+        if not contract.tradingsymbol or not contract.option_type:
+            continue
+        specs.append(
+            {
+                "input": input_value,
+                "order": order,
+                "contract": contract,
+                "option_side": contract.option_type,
+                "strike_offset": strike_offset,
+                "active_times": None,
+                "data_provider": "stored_exact",
+            }
+        )
+    return specs
 
 
 def _summarize(trades: list[dict[str, Any]]) -> dict[str, Any]:
@@ -909,8 +1030,12 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
     to_dt = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=settings.timezone)
     trade_from_dt = datetime.combine(start_date, time.min, tzinfo=settings.timezone)
     trade_to_dt = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=settings.timezone)
-    use_candle_cache = end_date < datetime.now(settings.timezone).date()
     price_provider = OptionPriceProvider(settings)
+    exact_repository = ExactCandleRepository(
+        settings.mongodb_uri,
+        settings.mongodb_database,
+        settings.mongodb_option_candles_collection,
+    )
 
     try:
         mode = str(request.mode or "fixed").strip().lower()
@@ -920,6 +1045,19 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
             contract_inputs = ["PE", "CE"] if side == "BOTH" else [side]
             if any(item not in {"PE", "CE"} for item in contract_inputs):
                 raise ValueError("Contract side must be PE, CE, or BOTH.")
+            contract_specs = []
+            for order, side_input in enumerate(contract_inputs):
+                stored_specs = _stored_contract_specs(
+                    exact_repository,
+                    instrument.id,
+                    side_input,
+                    trade_from_dt,
+                    trade_to_dt,
+                    order,
+                    side_input,
+                    strike_offset=int(request.strike_offset or 0),
+                )
+                contract_specs.extend(stored_specs)
             spot_frame, _spot_source = _fetch_backtest_candles(
                 settings,
                 instrument,
@@ -928,7 +1066,6 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 end_date,
                 "5m",
             )
-            contract_specs = []
             for order, side_input in enumerate(contract_inputs):
                 contract_specs.extend(
                     _dynamic_contract_specs(
@@ -943,6 +1080,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                         option_exchange,
                         option_underlying,
                         max_expiry_gap_days=max_historical_expiry_gap_days,
+                        allow_cached=False,
                     )
                 )
         else:
@@ -955,17 +1093,73 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 raise ValueError("At least one fixed contract is required.")
             contract_specs = []
             for order, contract_input in enumerate(contract_inputs):
+                compact_contract = re.fullmatch(r"(\d+)(CE|PE)", contract_input)
+                if compact_contract:
+                    strike = int(compact_contract.group(1))
+                    option_type = compact_contract.group(2)
+                    stored_specs = _stored_contract_specs(
+                        exact_repository,
+                        instrument.id,
+                        option_type,
+                        trade_from_dt,
+                        trade_to_dt,
+                        order,
+                        contract_input,
+                        strike=strike,
+                    )
+                    if stored_specs:
+                        contract_specs.extend(stored_specs)
+                        continue
+                    specs_by_symbol: dict[str, dict[str, Any]] = {}
+                    current_day = start_date
+                    while current_day <= end_date:
+                        resolve_as_of = datetime.combine(current_day, time.min, tzinfo=settings.timezone)
+                        contract = price_provider.resolve_contract(
+                            strike,
+                            option_type,
+                            resolve_as_of,
+                            exchange=option_exchange,
+                            underlying=option_underlying,
+                            max_expiry_gap_days=max_historical_expiry_gap_days,
+                            allow_cached=False,
+                        )
+                        if contract is not None:
+                            expiry_date = datetime.fromisoformat(contract.expiry).date() if contract.expiry else None
+                            if expiry_date is None or current_day <= expiry_date:
+                                day_start = datetime.combine(current_day, time.min, tzinfo=settings.timezone)
+                                active_times = {
+                                    (day_start + timedelta(minutes=signal_interval_minutes * index)).isoformat()
+                                    for index in range((24 * 60) // signal_interval_minutes)
+                                }
+                                spec = specs_by_symbol.setdefault(
+                                    contract.tradingsymbol,
+                                    {
+                                        "input": contract_input,
+                                        "order": order,
+                                        "contract": contract,
+                                        "option_side": contract.option_type,
+                                        "strike_offset": None,
+                                        "active_times": set(),
+                                    },
+                                )
+                                spec["active_times"].update(active_times)
+                        current_day += timedelta(days=1)
+
+                    contract_specs.extend(specs_by_symbol.values())
+                    continue
+
                 contract = price_provider.resolve_contract_input(
                     contract_input,
                     datetime.combine(start_date, entry_window, tzinfo=settings.timezone),
                     option_exchange,
                     option_underlying,
                     max_expiry_gap_days=max_historical_expiry_gap_days,
+                    allow_cached=False,
                 )
                 if contract is None:
                     raise ValueError(
                         f"Option contract not found for {instrument.id} {contract_input} near {start_date.isoformat()}. "
-                        "The backtest will not fall forward to a later weekly expiry like the current expiry."
+                        "For expired historical contracts, exact option candles must already be stored in MongoDB."
                     )
                 contract_specs.append(
                     {
@@ -978,28 +1172,55 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     }
                 )
 
+        deduped_specs: dict[tuple[str, int], dict[str, Any]] = {}
+        for spec in contract_specs:
+            contract = spec["contract"]
+            key = (contract.tradingsymbol, int(spec.get("order") or 0))
+            existing = deduped_specs.get(key)
+            if existing is None or (
+                existing.get("data_provider") != "stored_exact"
+                and spec.get("data_provider") == "stored_exact"
+            ):
+                deduped_specs[key] = spec
+        contract_specs = list(deduped_specs.values())
+
         if not contract_specs:
-            raise ValueError("No NIFTY option contracts could be resolved for this backtest.")
+            raise ValueError(
+                f"No {instrument.id} option contracts could be resolved for this backtest. "
+                "For expired historical contracts, exact option candles must already be stored in MongoDB."
+            )
 
         contract_contexts: list[dict[str, Any]] = []
         signal_events: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         signal_diagnostics: list[dict[str, Any]] = []
-        st_value_rows: list[dict[str, Any]] = []
+        both_green_candle_count = 0
         raw_buy_signal_count = 0
         body_accepted_signal_count = 0
         for spec in contract_specs:
             contract = spec["contract"]
-            option_candles = _option_candles_to_frame(
-                price_provider.historical_option_candles(
-                    contract,
+            if spec.get("data_provider") == "stored_exact":
+                option_candles = _stored_option_frame(
+                    settings,
+                    exact_repository,
+                    instrument.id,
+                    contract.tradingsymbol,
                     from_dt,
                     to_dt,
-                    interval="5minute",
-                    use_cache=use_candle_cache,
-                ),
-                settings.timezone,
-            )
+                )
+                data_source = "stored_exact_option_5minute"
+            else:
+                option_candles = _option_candles_to_frame(
+                    price_provider.historical_option_candles(
+                        contract,
+                        from_dt,
+                        to_dt,
+                        interval="5minute",
+                        use_cache=False,
+                    ),
+                    settings.timezone,
+                )
+                data_source = "zerodha_option_5minute"
             if option_candles.empty:
                 skipped.append(
                     {
@@ -1019,57 +1240,29 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "active_times": spec.get("active_times"),
                 "option_candles": option_candles,
                 "signal_frame": signal_frame,
+                "data_source": data_source,
             }
             contract_contexts.append(context)
 
-            if start_date == end_date:
-                for st_index, st_row in signal_frame.iterrows():
-                    candle_time = _as_ist(st_index, settings.timezone)
-                    if candle_time.date() != start_date:
-                        continue
-                    signal_value = st_row.get("signal")
-                    signal_value = None if pd.isna(signal_value) else str(signal_value).upper()
-                    signal_open = round(float(st_row["Open"]), 2)
-                    signal_close = round(float(st_row["Close"]), 2)
-                    body_pct = (
-                        round((abs(signal_close - signal_open) / signal_open) * 100.0, 2)
-                        if signal_open > 0
-                        else None
-                    )
-                    st_value_rows.append(
-                        {
-                            "candleTime": candle_time.isoformat(),
-                            "optionSymbol": contract.tradingsymbol,
-                            "open": signal_open,
-                            "high": round(float(st_row["High"]), 2),
-                            "low": round(float(st_row["Low"]), 2),
-                            "close": signal_close,
-                            "bodyPct": body_pct,
-                            "st10_1": round(float(st_row["st_10_1"]), 2),
-                            "st10_3": round(float(st_row["st_10_3"]), 2),
-                            "st10_1Trend": int(st_row.get("st_10_1_trend") or 0),
-                            "st10_3Trend": int(st_row.get("st_10_3_trend") or 0),
-                            "signal": signal_value,
-                            "isBuySignal": signal_value == "BUY",
-                            "bodyAccepted": (
-                                signal_value == "BUY"
-                                and body_pct is not None
-                                and request.min_body_pct <= body_pct <= request.max_body_pct
-                            ),
-                        }
-                    )
+            eligible_days: set[date] = set()
+            buy_signal_days: set[date] = set()
+            accepted_signal_days: set[date] = set()
 
             for index in range(1, len(signal_frame)):
                 row = signal_frame.iloc[index]
-                signal = row.get("signal")
-                if pd.isna(signal) or str(signal).upper() != "BUY":
-                    continue
                 candle_time = _as_ist(signal_frame.index[index], settings.timezone)
                 if candle_time < trade_from_dt or candle_time >= trade_to_dt:
                     continue
                 active_times = context.get("active_times")
                 if active_times is not None and candle_time.isoformat() not in active_times:
                     continue
+                eligible_days.add(candle_time.date())
+                if int(row.get("st_10_1_trend") or 0) == 1 and int(row.get("st_10_3_trend") or 0) == 1:
+                    both_green_candle_count += 1
+                signal = row.get("signal")
+                if pd.isna(signal) or str(signal).upper() != "BUY":
+                    continue
+                buy_signal_days.add(candle_time.date())
                 raw_buy_signal_count += 1
                 signal_open = round(float(row["Open"]), 2)
                 signal_close = round(float(row["Close"]), 2)
@@ -1101,6 +1294,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                         }
                     )
                     continue
+                accepted_signal_days.add(candle_time.date())
                 execute_at = candle_time + timedelta(minutes=signal_interval_minutes)
                 body_accepted_signal_count += 1
                 signal_events.append(
@@ -1110,6 +1304,39 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                         "row": row,
                         "context": context,
                         "signal_candle_body_pct": body_pct,
+                    }
+                )
+
+            for signal_day in sorted(eligible_days - buy_signal_days):
+                day_rows = signal_frame[signal_frame.index.date == signal_day]
+                if day_rows.empty:
+                    continue
+                last_row = day_rows.iloc[-1]
+                skipped.append(
+                    {
+                        "candleTime": _as_ist(day_rows.index[-1], settings.timezone).isoformat(),
+                        "signal": "BUY",
+                        "optionSymbol": contract.tradingsymbol,
+                        "reason": "no_fresh_buy_signal",
+                        "close": round(float(last_row["Close"]), 2),
+                        "fastTrend": int(last_row.get("st_10_1_trend") or 0),
+                        "slowTrend": int(last_row.get("st_10_3_trend") or 0),
+                    }
+                )
+            for signal_day in sorted(buy_signal_days - accepted_signal_days):
+                if any(
+                    item.get("reason") == "signal_candle_body_outside_range"
+                    and item.get("candleTime", "").startswith(signal_day.isoformat())
+                    and item.get("optionSymbol") == contract.tradingsymbol
+                    for item in skipped
+                ):
+                    continue
+                skipped.append(
+                    {
+                        "signal": "BUY",
+                        "optionSymbol": contract.tradingsymbol,
+                        "reason": "buy_signal_rejected_before_execution",
+                        "date": signal_day.isoformat(),
                     }
                 )
 
@@ -1137,6 +1364,12 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 skipped.append({"candleTime": candle_time.isoformat(), "optionSymbol": contract.tradingsymbol, "reason": "entry_candle_unavailable"})
                 continue
             entry_at, entry_row = entry_candidate
+            actual_strike = int(round(float(row.get("Strike") or entry_row.get("Strike") or contract.strike or 0)))
+            display_symbol = (
+                f"{instrument.id}{actual_strike}{contract.option_type}"
+                if actual_strike
+                else contract.tradingsymbol
+            )
             base_entry_price = round(float(entry_row["Open"]), 2)
             entry_price = _apply_entry_slippage(base_entry_price, settings.paper_trade_slippage_pct)
             quantity = _normalize_quantity(request.balance, entry_price, instrument.lot_size)
@@ -1248,9 +1481,9 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     "trendFlipCandleTime": trend_flip_exit["candleTime"].isoformat()
                     if exit_reason == "SUPER_TREND_FLIP" and trend_flip_exit is not None
                     else None,
-                    "strike": contract.strike,
+                    "strike": actual_strike or contract.strike,
                     "optionType": contract.option_type,
-                    "optionSymbol": contract.tradingsymbol,
+                    "optionSymbol": display_symbol,
                     "signalCandleOpen": round(float(row["Open"]), 2),
                     "signalCandleClose": round(float(row["Close"]), 2),
                     "signalCandleLow": signal_low_stop,
@@ -1269,7 +1502,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     "netPnl": net_pnl,
                     "status": status,
                     "exitReason": exit_reason,
-                    "executionSource": "zerodha_option_5minute",
+                    "executionSource": context.get("data_source") or "zerodha_option_5minute",
                 }
             )
 
@@ -1296,19 +1529,29 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "entrySignal": "BUY",
                 "maxBodyPct": request.max_body_pct,
                 "minBodyPct": request.min_body_pct,
+                "bothGreenCandleCount": both_green_candle_count,
                 "rawBuySignalCount": raw_buy_signal_count,
+                "freshBuyArrowCount": raw_buy_signal_count,
+                "greenStateButNoFreshSignalCount": max(both_green_candle_count - raw_buy_signal_count, 0),
                 "bodyAcceptedSignalCount": body_accepted_signal_count,
-                "stValueRows": st_value_rows,
+                "bodyRejectedSignalCount": max(raw_buy_signal_count - body_accepted_signal_count, 0),
                 "executedTradeCount": len(trades),
                 "skippedCount": len(skipped),
                 "skippedReasonCounts": skipped_reason_counts,
                 "signalDiagnostics": signal_diagnostics[:100],
                 "candleCount": sum(len(context["signal_frame"]) for context in contract_contexts),
-                "pricingModel": "zerodha_option_5minute",
+                "pricingModel": (
+                    "stored_exact_option_5minute"
+                    if any(context.get("data_source") == "stored_exact_option_5minute" for context in contract_contexts)
+                    else "zerodha_option_5minute"
+                ),
+                "signalDataSource": " / ".join(sorted({str(context.get("data_source")) for context in contract_contexts})),
+                "executionDataSource": " / ".join(sorted({str(context.get("data_source")) for context in contract_contexts})),
             },
         }
     finally:
         price_provider.close()
+        exact_repository.close()
 
 
 def run_backtest(settings, request: BacktestRequest) -> dict[str, Any]:

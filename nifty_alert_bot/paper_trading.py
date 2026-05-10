@@ -84,6 +84,37 @@ def _exit_execution_price(price: float, slippage_pct: float, signal: str | None)
     return _apply_exit_slippage(price, slippage_pct)
 
 
+def _first_hit_stop_loss(
+    entry_price: float,
+    signal_stop_price: float,
+    stop_loss_pct: float,
+    signal: str | None,
+) -> tuple[float, str]:
+    short_trade = _is_short_trade_signal(signal)
+    fixed_multiplier = 1 + stop_loss_pct / 100.0 if short_trade else 1 - stop_loss_pct / 100.0
+    fixed_stop_price = round(entry_price * fixed_multiplier, 2)
+    signal_source = "entry_signal_option_candle_high" if short_trade else "entry_signal_option_candle_low"
+    fixed_source = f"fixed_{stop_loss_pct:g}pct"
+
+    candidates: list[tuple[float, str]] = []
+    if short_trade:
+        if signal_stop_price > entry_price:
+            candidates.append((round(signal_stop_price, 2), signal_source))
+        if fixed_stop_price > entry_price:
+            candidates.append((fixed_stop_price, fixed_source))
+        if candidates:
+            return min(candidates, key=lambda item: item[0])
+    else:
+        if signal_stop_price < entry_price:
+            candidates.append((round(signal_stop_price, 2), signal_source))
+        if fixed_stop_price < entry_price:
+            candidates.append((fixed_stop_price, fixed_source))
+        if candidates:
+            return max(candidates, key=lambda item: item[0])
+
+    return round(signal_stop_price, 2), signal_source
+
+
 def _trade_gross_pnl(entry_price: float, exit_price: float, quantity: int, signal: str | None) -> float:
     if _is_short_trade_signal(signal):
         return round((entry_price - exit_price) * quantity, 2)
@@ -383,7 +414,18 @@ class PaperTradingEngine:
 
         short_trade = _is_short_trade_signal(trade.get("signal"))
         stop_loss_mode = str(trade.get("stop_loss_mode") or "").lower()
-        if stop_loss_mode == "percent":
+        if trade.get("strategy_mode") == "option_contracts":
+            signal_stop_price = _safe_float(trade.get("stop_loss_reference"))
+            if signal_stop_price is not None:
+                trade["stop_loss_price"], trade["stop_loss_source"] = _first_hit_stop_loss(
+                    fill_price,
+                    signal_stop_price,
+                    percent_stop_loss_pct,
+                    trade.get("signal"),
+                )
+                trade["stop_loss_source"] = f"{trade['stop_loss_source']}_live_fill"
+                stop_loss_mode = "first_hit"
+        elif stop_loss_mode == "percent":
             stop_multiplier = 1 + percent_stop_loss_pct / 100.0 if short_trade else 1 - percent_stop_loss_pct / 100.0
             trade["stop_loss_price"] = round(fill_price * stop_multiplier, 2)
             trade["stop_loss_source"] = f"fixed_{percent_stop_loss_pct:g}pct_live_fill"
@@ -391,7 +433,11 @@ class PaperTradingEngine:
         stop_loss_price = float(trade["stop_loss_price"])
         invalid_stop_loss = stop_loss_price <= fill_price if short_trade else stop_loss_price >= fill_price
         stop_loss_pct = round((abs(fill_price - stop_loss_price) / fill_price) * 100.0, 2)
-        if invalid_stop_loss or (stop_loss_mode != "percent" and stop_loss_pct > self.settings.paper_trade_max_sl_pct):
+        if invalid_stop_loss or (
+            trade.get("strategy_mode") != "option_contracts"
+            and stop_loss_mode != "percent"
+            and stop_loss_pct > self.settings.paper_trade_max_sl_pct
+        ):
             stop_multiplier = (
                 1 + self.settings.paper_trade_max_sl_pct / 100.0
                 if short_trade
@@ -1355,15 +1401,14 @@ class PaperTradingEngine:
                 },
             )
 
-        stop_loss_mode = str(self.settings.option_contract_stop_loss_mode or "signal_low").lower()
         short_trade = _is_short_trade_signal(entry_signal)
-        if stop_loss_mode == "percent":
-            stop_loss_multiplier = 1 + self.settings.option_contract_stop_loss_pct / 100.0 if short_trade else 1 - self.settings.option_contract_stop_loss_pct / 100.0
-            stop_loss_price = round(entry_price * stop_loss_multiplier, 2)
-            stop_loss_source = f"fixed_{self.settings.option_contract_stop_loss_pct:g}pct"
-        else:
-            stop_loss_price = signal_candle_high if short_trade else signal_candle_low
-            stop_loss_source = "entry_signal_option_candle_high" if short_trade else "entry_signal_option_candle_low"
+        signal_stop_price = signal_candle_high if short_trade else signal_candle_low
+        stop_loss_price, stop_loss_source = _first_hit_stop_loss(
+            entry_price,
+            signal_stop_price,
+            self.settings.option_contract_stop_loss_pct,
+            entry_signal,
+        )
         stop_loss_pct = round((abs(entry_price - stop_loss_price) / entry_price) * 100.0, 2)
         invalid_stop_loss = stop_loss_price <= entry_price if short_trade else stop_loss_price >= entry_price
         if invalid_stop_loss:
@@ -1383,15 +1428,6 @@ class PaperTradingEngine:
                     "contract_signals": contract_details,
                 },
             )
-        if stop_loss_mode != "percent" and stop_loss_pct > self.settings.paper_trade_max_sl_pct:
-            stop_loss_multiplier = 1 + self.settings.paper_trade_max_sl_pct / 100.0 if short_trade else 1 - self.settings.paper_trade_max_sl_pct / 100.0
-            stop_loss_price = round(
-                entry_price * stop_loss_multiplier,
-                2,
-            )
-            stop_loss_pct = round(self.settings.paper_trade_max_sl_pct, 2)
-            stop_loss_source = f"{stop_loss_source}_capped_{self.settings.paper_trade_max_sl_pct:g}pct"
-
         target_multiplier = 1 - self.settings.option_contract_target_pct / 100.0 if short_trade else 1 + self.settings.option_contract_target_pct / 100.0
 
         trade = {
@@ -1427,8 +1463,8 @@ class PaperTradingEngine:
             "signal_candle_range_pct": signal_candle_body_pct,
             "max_signal_candle_pct": self.settings.option_contract_max_signal_candle_pct,
             "min_signal_candle_pct": self.settings.option_contract_min_signal_candle_pct,
-            "stop_loss_reference": signal_candle_high if short_trade else signal_candle_low,
-            "stop_loss_mode": stop_loss_mode,
+            "stop_loss_reference": signal_stop_price,
+            "stop_loss_mode": "first_hit",
             "stop_loss_pct": stop_loss_pct,
             "stop_loss_source": stop_loss_source,
             "stop_loss_price": stop_loss_price,

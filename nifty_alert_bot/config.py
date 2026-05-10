@@ -60,6 +60,11 @@ class Settings:
     zerodha_underlying: str
     zerodha_enable_websocket: bool
     zerodha_quote_timeout_seconds: float
+    mongodb_option_candles_collection: str
+    enable_exact_candle_storage: bool
+    nifty_store_strike_offsets: str
+    sensex_store_strike_offsets: str
+    store_option_types: str
     live_trading_use_broker_exits: bool
     live_trading_sl_order_type: str
 
@@ -193,6 +198,13 @@ def get_settings() -> Settings:
         zerodha_enable_websocket=os.getenv("ZERODHA_ENABLE_WEBSOCKET", "true").strip().lower()
         in {"1", "true", "yes", "on"},
         zerodha_quote_timeout_seconds=float(os.getenv("ZERODHA_QUOTE_TIMEOUT_SECONDS", "2.0")),
+        mongodb_option_candles_collection=os.getenv("MONGODB_OPTION_CANDLES_COLLECTION", "option_candles").strip()
+        or "option_candles",
+        enable_exact_candle_storage=os.getenv("ENABLE_EXACT_CANDLE_STORAGE", "true").strip().lower()
+        in {"1", "true", "yes", "on"},
+        nifty_store_strike_offsets=os.getenv("NIFTY_STORE_STRIKE_OFFSETS", "-100,0,100,200").strip(),
+        sensex_store_strike_offsets=os.getenv("SENSEX_STORE_STRIKE_OFFSETS", "-200,0,200").strip(),
+        store_option_types=os.getenv("STORE_OPTION_TYPES", "PE,CE").strip(),
         live_trading_use_broker_exits=os.getenv("LIVE_TRADING_USE_BROKER_EXITS", "true").strip().lower()
         in {"1", "true", "yes", "on"},
         live_trading_sl_order_type=os.getenv("LIVE_TRADING_SL_ORDER_TYPE", "SL-M").strip().upper() or "SL-M",

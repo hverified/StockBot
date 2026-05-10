@@ -12,8 +12,26 @@ def true_range(frame: pd.DataFrame) -> pd.Series:
 
 
 def rma(series: pd.Series, period: int) -> pd.Series:
-    # TradingView's ta.atr uses Wilder's smoothing (RMA).
-    return series.ewm(alpha=1 / period, adjust=False).mean()
+    # TradingView's ta.rma seeds Wilder smoothing with SMA over the first
+    # `period` values, then applies alpha = 1 / period. Starting the EMA from
+    # the first candle shifts ATR and Supertrend flips noticeably.
+    values = pd.to_numeric(series, errors="coerce")
+    result = pd.Series(np.nan, index=values.index, dtype="float64")
+    valid = values.dropna()
+    if len(valid) < period:
+        return result
+
+    first_average = float(valid.iloc[:period].mean())
+    first_index = valid.index[period - 1]
+    result.loc[first_index] = first_average
+
+    previous = first_average
+    alpha = 1 / period
+    for index, value in valid.iloc[period:].items():
+        previous = (alpha * float(value)) + ((1 - alpha) * previous)
+        result.loc[index] = previous
+
+    return result
 
 
 def atr(frame: pd.DataFrame, period: int) -> pd.Series:

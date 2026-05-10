@@ -18,6 +18,26 @@ from nifty_alert_bot.instruments import get_instrument_spec
 
 logger = logging.getLogger(__name__)
 
+_OPTION_CACHE_RE = re.compile(
+    r"^(?P<exchange>[A-Z]+)_(?P<token>\d+)_(?P<symbol>[A-Z0-9]+)_"
+    r"(?P<interval>[A-Za-z0-9_-]+)_(?P<from>\d{12})_(?P<to>\d{12})\.json$",
+    re.IGNORECASE,
+)
+_WEEKLY_MONTH_CODES = {
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "O": 10,
+    "N": 11,
+    "D": 12,
+}
+
 try:
     from kiteconnect import KiteConnect, KiteTicker
     from kiteconnect.exceptions import TokenException
@@ -79,6 +99,45 @@ def _kite_interval(interval: str) -> str:
         "day": "day",
         "1d": "day",
     }.get(str(interval).strip().lower(), interval)
+
+
+def _parse_option_symbol(symbol: str, underlying: str) -> dict[str, Any] | None:
+    target_symbol = str(symbol or "").strip().upper()
+    target_underlying = str(underlying or "").strip().upper()
+    if not target_symbol.startswith(target_underlying):
+        return None
+
+    option_type = target_symbol[-2:]
+    if option_type not in {"CE", "PE"}:
+        return None
+
+    body = target_symbol[len(target_underlying):-2]
+    if len(body) < 6 or not body[:2].isdigit():
+        return None
+
+    year = 2000 + int(body[:2])
+    remainder = body[2:]
+    expiry_date = None
+    strike_text = ""
+
+    month_code = remainder[:1].upper()
+    if len(remainder) >= 4 and month_code in _WEEKLY_MONTH_CODES and remainder[1:3].isdigit():
+        month = _WEEKLY_MONTH_CODES[month_code]
+        day = int(remainder[1:3])
+        strike_text = remainder[3:]
+        try:
+            expiry_date = date(year, month, day)
+        except ValueError:
+            expiry_date = None
+
+    if expiry_date is None or not strike_text.isdigit():
+        return None
+
+    return {
+        "expiry": expiry_date,
+        "strike": int(strike_text),
+        "option_type": option_type,
+    }
 
 
 class OptionPriceProvider:
@@ -377,21 +436,40 @@ class OptionPriceProvider:
         exchange: str | None = None,
         underlying: str | None = None,
         max_expiry_gap_days: int | None = None,
+        allow_cached: bool = True,
     ) -> OptionContract | None:
-        if not self.zerodha_available:
-            return None
-
         target_exchange = exchange or self.settings.zerodha_option_exchange
         target_underlying = (underlying or self.settings.zerodha_underlying).upper()
+
+        if not self.zerodha_available:
+            if not allow_cached:
+                return None
+            return self._resolve_cached_option_contract(
+                strike,
+                option_type,
+                as_of,
+                target_exchange,
+                target_underlying,
+                max_expiry_gap_days,
+            )
 
         try:
             rows = self._load_option_instruments(exchange=target_exchange)
         except Exception as exc:
             if _is_token_error(exc):
-                logger.info("Zerodha option instruments unavailable: invalid or expired access token. Falling back to synthetic pricing.")
+                logger.info("Zerodha option instruments unavailable: invalid or expired access token.")
             else:
-                logger.exception("Unable to load Zerodha option instruments. Falling back to synthetic pricing.")
-            return None
+                logger.exception("Unable to load Zerodha option instruments.")
+            if not allow_cached:
+                return None
+            return self._resolve_cached_option_contract(
+                strike,
+                option_type,
+                as_of,
+                target_exchange,
+                target_underlying,
+                max_expiry_gap_days,
+            )
 
         as_of_date = as_of.date()
         matches: list[dict[str, Any]] = []
@@ -413,8 +491,19 @@ class OptionPriceProvider:
             matches.append(item)
 
         if not matches:
+            if allow_cached:
+                cached_contract = self._resolve_cached_option_contract(
+                    strike,
+                    option_type,
+                    as_of,
+                    target_exchange,
+                    target_underlying,
+                    max_expiry_gap_days,
+                )
+                if cached_contract is not None:
+                    return cached_contract
             logger.warning(
-                "No Zerodha option instrument found for %s %s %s. Using synthetic fallback.",
+                "No Zerodha or cached option instrument found for %s %s %s.",
                 target_underlying,
                 strike,
                 option_type,
@@ -473,6 +562,7 @@ class OptionPriceProvider:
         exchange: str | None = None,
         underlying: str | None = None,
         max_expiry_gap_days: int | None = None,
+        allow_cached: bool = True,
     ) -> OptionContract | None:
         normalized = str(contract_input or "").strip().upper().replace(" ", "")
         if not normalized:
@@ -489,6 +579,7 @@ class OptionPriceProvider:
                 exchange=exchange,
                 underlying=underlying,
                 max_expiry_gap_days=max_expiry_gap_days,
+                allow_cached=allow_cached,
             )
 
         side_match = re.fullmatch(r"(CE|PE)", normalized)
@@ -519,6 +610,7 @@ class OptionPriceProvider:
                 exchange=exchange,
                 underlying=target_underlying,
                 max_expiry_gap_days=max_expiry_gap_days,
+                allow_cached=allow_cached,
             )
 
         return self.find_contract_by_symbol(normalized, exchange)
@@ -626,9 +718,6 @@ class OptionPriceProvider:
         *,
         use_cache: bool = False,
     ) -> list[dict[str, Any]]:
-        if not self.zerodha_available:
-            return []
-
         from_ist = from_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
         to_ist = to_dt.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
         cache_path = (
@@ -642,6 +731,19 @@ class OptionPriceProvider:
                 return self._load_cached_candles(cache_path)
             except Exception:
                 logger.warning("Ignoring unreadable candle cache %s.", cache_path, exc_info=True)
+
+        if use_cache:
+            cached_candles = self._load_cached_option_candles_for_contract(
+                contract,
+                from_ist,
+                to_ist,
+                interval,
+            )
+            if cached_candles:
+                return cached_candles
+
+        if not self.zerodha_available:
+            return []
 
         try:
             candles = self._get_kite().historical_data(
@@ -672,6 +774,60 @@ class OptionPriceProvider:
                 )
             return []
 
+    def _resolve_cached_option_contract(
+        self,
+        strike: int,
+        option_type: str,
+        as_of: datetime,
+        exchange: str,
+        underlying: str,
+        max_expiry_gap_days: int | None = None,
+    ) -> OptionContract | None:
+        as_of_date = as_of.astimezone(self.settings.timezone).date()
+        matches: list[OptionContract] = []
+
+        for path in self._option_cache_files():
+            metadata = self._cached_option_file_metadata(path, underlying)
+            if metadata is None:
+                continue
+            if metadata["exchange"] != str(exchange).upper():
+                continue
+            if metadata["strike"] != int(strike):
+                continue
+            if metadata["option_type"] != str(option_type).upper():
+                continue
+
+            expiry_date = metadata["expiry"]
+            if expiry_date < as_of_date:
+                continue
+            if max_expiry_gap_days is not None and (expiry_date - as_of_date).days > max_expiry_gap_days:
+                continue
+
+            matches.append(
+                OptionContract(
+                    exchange=metadata["exchange"],
+                    tradingsymbol=metadata["symbol"],
+                    instrument_token=metadata["token"],
+                    strike=metadata["strike"],
+                    option_type=metadata["option_type"],
+                    expiry=expiry_date.isoformat(),
+                )
+            )
+
+        if not matches:
+            return None
+
+        chosen = min(matches, key=lambda item: (datetime.fromisoformat(item.expiry).date(), item.tradingsymbol))
+        logger.info(
+            "Resolved %s %s %s from cached Zerodha option candles: %s expiring %s.",
+            underlying,
+            strike,
+            option_type,
+            chosen.tradingsymbol,
+            chosen.expiry,
+        )
+        return chosen
+
     def _get_kite(self):
         if self._kite is None:
             if not self.zerodha_available:
@@ -686,6 +842,71 @@ class OptionPriceProvider:
             kite = self._get_kite()
             self._instrument_rows_by_exchange[target_exchange] = kite.instruments(target_exchange)
         return self._instrument_rows_by_exchange[target_exchange]
+
+    def _option_cache_files(self) -> list[Path]:
+        cache_dir = Path(getattr(self.settings, "candle_cache_dir", "logs/candle_cache")) / "zerodha_options"
+        if not cache_dir.exists():
+            return []
+        return list(cache_dir.glob("*.json"))
+
+    def _cached_option_file_metadata(self, path: Path, underlying: str) -> dict[str, Any] | None:
+        match = _OPTION_CACHE_RE.fullmatch(path.name.upper())
+        if match is None:
+            return None
+
+        symbol = match.group("symbol").upper()
+        parsed = _parse_option_symbol(symbol, underlying)
+        if parsed is None:
+            return None
+
+        return {
+            "exchange": match.group("exchange").upper(),
+            "token": int(match.group("token")),
+            "symbol": symbol,
+            "interval": match.group("interval"),
+            "expiry": parsed["expiry"],
+            "strike": parsed["strike"],
+            "option_type": parsed["option_type"],
+        }
+
+    def _load_cached_option_candles_for_contract(
+        self,
+        contract: OptionContract,
+        from_ist: datetime,
+        to_ist: datetime,
+        interval: str,
+    ) -> list[dict[str, Any]]:
+        target_interval = re.sub(r"[^A-Za-z0-9_-]+", "_", str(interval)).upper()
+        rows_by_time: dict[datetime, dict[str, Any]] = {}
+
+        for path in self._option_cache_files():
+            match = _OPTION_CACHE_RE.fullmatch(path.name.upper())
+            if match is None:
+                continue
+            if match.group("exchange").upper() != contract.exchange.upper():
+                continue
+            if int(match.group("token")) != int(contract.instrument_token):
+                continue
+            if match.group("symbol").upper() != contract.tradingsymbol.upper():
+                continue
+            if match.group("interval").upper() != target_interval:
+                continue
+
+            try:
+                candles = self._load_cached_candles(path)
+            except Exception:
+                logger.warning("Ignoring unreadable candle cache %s.", path, exc_info=True)
+                continue
+
+            for candle in candles:
+                candle_time = candle.get("date")
+                if not isinstance(candle_time, datetime):
+                    continue
+                candle_time = candle_time.astimezone(self.settings.timezone).replace(second=0, microsecond=0)
+                if from_ist <= candle_time < to_ist:
+                    rows_by_time[candle_time] = candle
+
+        return [rows_by_time[key] for key in sorted(rows_by_time)]
 
     def _historical_option_cache_path(
         self,

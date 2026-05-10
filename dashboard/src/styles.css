@@ -730,6 +730,7 @@ th {
 .metrics-grid,
 .content-grid,
 .log-summary-grid,
+.balance-card-grid,
 .report-metrics-grid {
   display: grid;
   gap: var(--card-gap);
@@ -1029,6 +1030,186 @@ th {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: end;
+}
+
+.balance-card-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.balance-card__footer {
+  grid-template-columns: minmax(220px, 0.34fr) minmax(0, 1fr);
+}
+
+.balance-card__body {
+  display: grid;
+  gap: 10px;
+}
+
+.balance-hero {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 18px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--panel-strong) 82%, transparent),
+    color-mix(in srgb, var(--panel-fill-soft) 92%, transparent)
+  );
+}
+
+.balance-hero > span,
+.balance-metric dt {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.balance-hero strong {
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: clamp(1.7rem, 2.5vw, 2.35rem);
+  line-height: 1;
+  letter-spacing: -0.06em;
+  white-space: nowrap;
+}
+
+.balance-hero__meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.balance-hero__meta span {
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: var(--panel-fill);
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.balance-metric-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.balance-metric {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 64%, transparent);
+  border-radius: 14px;
+  background: var(--panel-fill-soft);
+}
+
+.balance-metric--wide {
+  grid-column: 1 / -1;
+}
+
+.balance-metric dd {
+  margin: 4px 0 0;
+  color: var(--text);
+  line-height: 1.25;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.balance-adjustments {
+  display: grid;
+  align-self: end;
+  gap: 8px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 64%, transparent);
+  border-radius: 14px;
+  background: var(--panel-fill-soft);
+  overflow: hidden;
+}
+
+.balance-adjustments summary {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 9px 11px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.balance-adjustments summary::-webkit-details-marker {
+  display: none;
+}
+
+.balance-adjustments summary::after {
+  content: "+";
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.balance-adjustments[open] summary::after {
+  content: "-";
+}
+
+.balance-adjustments summary strong {
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--panel-fill);
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0;
+}
+
+.mini-ledger {
+  display: grid;
+  gap: 6px;
+  padding: 0 9px 9px;
+}
+
+.mini-ledger__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 8px;
+  border-radius: 12px;
+  background: var(--panel-fill);
+}
+
+.mini-ledger__row span,
+.mini-ledger__row small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.mini-ledger__row strong {
+  color: var(--text);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.mini-ledger__row small {
+  flex: 1 1 180px;
+  min-width: 0;
+  text-align: right;
 }
 
 .live-command-card__stats {
@@ -2599,14 +2780,6 @@ td {
   line-height: 1.22;
 }
 
-.highlight-row {
-  background: color-mix(in srgb, var(--green) 10%, transparent);
-}
-
-.highlight-row:hover {
-  background: color-mix(in srgb, var(--green) 16%, transparent);
-}
-
 .column-picker {
   position: relative;
 }
@@ -3072,6 +3245,14 @@ td {
   .market-overview-layout,
   .market-quote-grid,
   .overview-bot-tables {
+    grid-template-columns: 1fr;
+  }
+
+  .balance-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .balance-card__footer {
     grid-template-columns: 1fr;
   }
 

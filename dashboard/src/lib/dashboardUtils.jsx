@@ -50,6 +50,7 @@ export const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
   { id: "niftyFiveMinuteBot", label: "NIFTY 5m Bot" },
   { id: "sensexFiveMinuteBot", label: "SENSEX 5m Bot" },
+  { id: "balance", label: "Balance" },
   { id: "trades", label: "Trades" },
   { id: "signals", label: "Signals" },
   { id: "reports", label: "Reports" },

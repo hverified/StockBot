@@ -160,7 +160,7 @@ class FiveMinuteOptionBacktestApiRequest(BaseModel):
     maxBodyPct: float
     minBodyPct: float = 0
     stopLossPct: float = 0
-    strikeOffset: int = 0
+    strikeOffset: int | str = 0
     entryTime: str
     exitTime: str
 
@@ -1383,6 +1383,9 @@ def add_paper_balance(payload: AddPaperBalanceRequest) -> dict:
     return {
         "message": "Paper balance updated.",
         "cashBalance": paper_state["cash_balance"],
+        "startingBalance": paper_state["starting_balance"],
+        "balanceAdjustments": paper_state["balance_adjustments"],
+        "strategyKey": strategy_key,
     }
 
 

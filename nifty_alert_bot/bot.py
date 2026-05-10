@@ -13,6 +13,7 @@ import pandas as pd
 from nifty_alert_bot.alerts import format_alert
 from nifty_alert_bot.config import get_settings
 from nifty_alert_bot.data import fetch_candles
+from nifty_alert_bot.exact_candle_collector import collect_exact_option_candles
 from nifty_alert_bot.indicators import build_signal_frame
 from nifty_alert_bot.logging_utils import configure_logging
 from nifty_alert_bot.notifier import TelegramNotifier
@@ -371,6 +372,22 @@ def process_once(
             return
 
         if settings.strategy_mode == "option_contracts":
+            if settings.option_contract_interval_minutes == 5:
+                try:
+                    storage_instrument = (
+                        "SENSEX"
+                        if state_key == SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY
+                        else "NIFTY"
+                    )
+                    stored_counts = collect_exact_option_candles(
+                        settings,
+                        now_ist,
+                        instrument_ids=[storage_instrument],
+                    )
+                    if stored_counts:
+                        logger.info("Stored exact option candles for %s: %s", storage_instrument, stored_counts)
+                except Exception:
+                    logger.exception("Exact option candle storage failed.")
             cycle_result = engine.evaluate_option_contracts(notifier, now_ist)
             record_run_event(
                 state,
