@@ -35,7 +35,6 @@ _MISSING_DAILY_SETUP_LOGGED: set[tuple[str, str]] = set()
 OPTION_CONTRACT_STRATEGY_PRIORITY = {
     DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY: 0,
     NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: 1,
-    NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY: 2,
 }
 
 
@@ -576,10 +575,6 @@ def build_option_contract_strategy_settings(settings) -> list[tuple[Any, str]]:
         (
             option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY),
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-        ),
-        (
-            option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY),
-            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
         ),
     ]
 

@@ -32,7 +32,6 @@ from nifty_alert_bot.exact_candle_repository import ExactCandleRepository
 from nifty_alert_bot.bot import (
     DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
     NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-    NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
     OPTION_CONTRACT_STRATEGY_KEY,
     SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
     build_state_store,
@@ -45,7 +44,6 @@ from nifty_alert_bot.dhan_trading import (
     dhan_exit_side_for_quantity,
     dhan_position_quantity,
 )
-from nifty_alert_bot.live_trading import LiveTradingBroker, LiveTradingError
 from nifty_alert_bot.option_price_provider import OptionPriceProvider
 from nifty_alert_bot.paper_trade_repository import PaperTradeRepository
 from nifty_alert_bot.run_log_store import RunLogStore
@@ -62,15 +60,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_LIVE_TRADING_SNAPSHOT_CACHE: dict[str, Any] = {
-    "expires_at": None,
-    "payload": None,
-}
 _DHAN_LIVE_TRADING_SNAPSHOT_CACHE: dict[str, Any] = {
     "expires_at": None,
     "payload": None,
 }
-_LIVE_TRADING_SNAPSHOT_TTL_SECONDS = 10
+_DHAN_LIVE_TRADING_SNAPSHOT_TTL_SECONDS = 10
 _OPTION_EXPIRY_CACHE: dict[str, Any] = {
     "expires_at": None,
     "items": {},
@@ -107,7 +101,6 @@ StrategyKeyLiteral = Literal[
     "option_contracts_1m",
     "option_contracts_1m_sensex",
     "option_contracts_5m",
-    "option_contracts_5m_v2",
     "dhan_nifty_5m_live",
 ]
 
@@ -148,10 +141,6 @@ class LiveTradingToggleRequest(BaseModel):
     ] | None = None
 
 
-class LiveOrderCancelRequest(BaseModel):
-    variety: str = "regular"
-
-
 class DhanLivePositionExitRequest(BaseModel):
     securityId: str
     tradingSymbol: str
@@ -175,7 +164,7 @@ class DhanInstrumentMasterCacheRequest(BaseModel):
 
 
 class BacktestApiRequest(BaseModel):
-    instrument: Literal["NIFTY", "BANKNIFTY", "SENSEX"] = "NIFTY"
+    instrument: Literal["NIFTY"] = "NIFTY"
     signalMode: Literal["both", "st_10_1"] = "both"
     startDate: str
     endDate: str
@@ -195,7 +184,7 @@ class BacktestExportRequest(BaseModel):
 
 
 class FiveMinuteOptionBacktestApiRequest(BaseModel):
-    instrument: Literal["NIFTY", "BANKNIFTY", "SENSEX"] = "NIFTY"
+    instrument: Literal["NIFTY"] = "NIFTY"
     mode: Literal["fixed", "dynamic"] = "fixed"
     contract1: str = ""
     contract2: str = ""
@@ -829,65 +818,9 @@ def _live_balance_summary(margins: dict[str, Any]) -> dict[str, float | None]:
     }
 
 
-def _clear_live_trading_cache() -> None:
-    _LIVE_TRADING_SNAPSHOT_CACHE["expires_at"] = None
-    _LIVE_TRADING_SNAPSHOT_CACHE["payload"] = None
-
-
 def _clear_dhan_live_trading_cache() -> None:
     _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["expires_at"] = None
     _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["payload"] = None
-
-
-def _load_live_trading_payload(settings, *, force_refresh: bool = False, lightweight: bool = False) -> dict:
-    state_store = build_state_store(settings)
-    broker = LiveTradingBroker(settings, state_store)
-    try:
-        status = broker.status()
-        payload = {
-            "status": status,
-            "orders": [],
-            "trades": [],
-            "positions": {},
-            "margins": {},
-            "balance": {},
-            "error": None,
-        }
-        if lightweight:
-            return payload
-        if status["zerodhaReady"]:
-            now = datetime.now(settings.timezone)
-            cached_until = _LIVE_TRADING_SNAPSHOT_CACHE.get("expires_at")
-            cached_payload = _LIVE_TRADING_SNAPSHOT_CACHE.get("payload")
-            if (
-                not force_refresh
-                and cached_until is not None
-                and cached_until > now
-                and isinstance(cached_payload, dict)
-            ):
-                cached_payload = dict(cached_payload)
-                cached_payload["status"] = status
-                return cached_payload
-            try:
-                payload.update(
-                    {
-                        "orders": broker.orderbook(),
-                        "trades": broker.trades(),
-                        "positions": broker.positions(),
-                        "margins": broker.margins(),
-                    }
-                )
-                payload["balance"] = _live_balance_summary(payload["margins"])
-                _LIVE_TRADING_SNAPSHOT_CACHE["expires_at"] = now + timedelta(
-                    seconds=_LIVE_TRADING_SNAPSHOT_TTL_SECONDS
-                )
-                _LIVE_TRADING_SNAPSHOT_CACHE["payload"] = dict(payload)
-            except Exception as exc:
-                payload["error"] = str(exc)
-        return payload
-    finally:
-        broker.close()
-        state_store.close()
 
 
 def _load_dhan_live_trading_payload(
@@ -954,7 +887,7 @@ def _load_dhan_live_trading_payload(
                     positions,
                 )
                 _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["expires_at"] = now + timedelta(
-                    seconds=_LIVE_TRADING_SNAPSHOT_TTL_SECONDS
+                    seconds=_DHAN_LIVE_TRADING_SNAPSHOT_TTL_SECONDS
                 )
                 _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["payload"] = dict(payload)
             except Exception as exc:
@@ -1191,12 +1124,6 @@ async def _stream_dhan_ltp_quotes(
             yield f"data: {json.dumps({'type': 'ltp', 'quote': quote})}\n\n"
 
 
-def _live_broker() -> tuple[LiveTradingBroker, Any]:
-    settings = get_settings()
-    state_store = build_state_store(settings)
-    return LiveTradingBroker(settings, state_store), state_store
-
-
 def _dhan_live_broker() -> tuple[DhanLiveTradingBroker, Any]:
     settings = get_settings()
     state_store = build_state_store(settings)
@@ -1420,7 +1347,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
     nifty_settings = option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY)
     sensex_settings = option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
     nifty_five_minute_settings = option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
-    nifty_five_minute_v2_settings = option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY)
     dhan_nifty_live_settings = option_strategy_settings_for_key(settings, DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY)
     state_store = build_state_store(settings)
     try:
@@ -1428,7 +1354,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
         paper_state = state_store.load_paper_trading(OPTION_CONTRACT_STRATEGY_KEY)
         sensex_paper_state = state_store.load_paper_trading(SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
         nifty_five_minute_paper_state = state_store.load_paper_trading(NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
-        nifty_five_minute_v2_paper_state = state_store.load_paper_trading(NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY)
         dhan_nifty_live_paper_state = state_store.load_paper_trading(DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY)
         trade_date = datetime.now(settings.timezone).date().isoformat()
         nifty_daily_contracts = state_store.load_daily_option_contracts(
@@ -1442,10 +1367,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
         nifty_five_minute_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-        )
-        nifty_five_minute_v2_daily_contracts = state_store.load_daily_option_contracts(
-            trade_date,
-            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
         )
         dhan_nifty_live_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
@@ -1465,11 +1386,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
             nifty_five_minute_settings,
             nifty_five_minute_daily_contracts,
-        ),
-        (
-            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
-            nifty_five_minute_v2_settings,
-            nifty_five_minute_v2_daily_contracts,
         ),
     ]
     configured_active_schedules = [
@@ -1525,15 +1441,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
         trade_history=[
             trade for trade in all_trade_history
             if _trade_matches_strategy_key(trade, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
-        ],
-    )
-    nifty_five_minute_v2_payload = _build_paper_dashboard_payload(
-        nifty_five_minute_v2_settings,
-        nifty_five_minute_v2_paper_state,
-        NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
-        trade_history=[
-            trade for trade in all_trade_history
-            if _trade_matches_strategy_key(trade, NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY)
         ],
     )
     dhan_nifty_live_payload = _build_paper_dashboard_payload(
@@ -1619,18 +1526,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
                     include_env_contracts=True,
                     include_next_expiry=not lightweight,
                 ),
-                NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY: _strategy_setup_payload(
-                    strategy_key=NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
-                    label="NIFTY 5m option bot V2",
-                    trade_date=trade_date,
-                    daily_setup=nifty_five_minute_v2_daily_contracts,
-                    settings=nifty_five_minute_v2_settings,
-                    schedule_start=(nifty_five_minute_v2_daily_contracts or {}).get("schedule_start") or nifty_five_minute_v2_settings.schedule_start,
-                    schedule_end=(nifty_five_minute_v2_daily_contracts or {}).get("schedule_end") or nifty_five_minute_v2_settings.schedule_end,
-                    target_pct=nifty_five_minute_v2_settings.option_contract_target_pct,
-                    include_env_contracts=True,
-                    include_next_expiry=not lightweight,
-                ),
                 DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY: _strategy_setup_payload(
                     strategy_key=DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
                     label="Dhan NIFTY 5m live",
@@ -1670,7 +1565,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
                 else _load_zerodha_health(settings)
             ),
         },
-        "liveTrading": _load_live_trading_payload(settings, lightweight=True),
         "dhan": {
             "clientIdConfigured": bool(settings.dhan_client_id),
             "accessTokenConfigured": bool(settings.dhan_access_token),
@@ -1690,7 +1584,6 @@ def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
             OPTION_CONTRACT_STRATEGY_KEY: nifty_paper_payload,
             SENSEX_OPTION_CONTRACT_STRATEGY_KEY: sensex_paper_payload,
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: nifty_five_minute_payload,
-            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY: nifty_five_minute_v2_payload,
             DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY: dhan_nifty_live_payload,
         },
     }
@@ -1886,7 +1779,6 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
         raise HTTPException(status_code=400, detail="Contract 1 is required.")
     five_minute_strategy = payload.strategyKey in {
         NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-        NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
         DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
     }
     contract_mode = payload.contractMode or "dynamic"
@@ -2168,65 +2060,6 @@ def zerodha_login_url() -> dict[str, str | bool]:
 def zerodha_health() -> dict:
     settings = get_settings()
     return _load_zerodha_health(settings)
-
-
-@app.get("/api/live-trading")
-def live_trading_status() -> dict:
-    return _load_live_trading_payload(get_settings(), force_refresh=True)
-
-
-@app.post("/api/live-trading/toggle")
-def live_trading_toggle(payload: LiveTradingToggleRequest) -> dict:
-    broker, state_store = _live_broker()
-    try:
-        _clear_live_trading_cache()
-        return {
-            "status": broker.set_enabled(
-                payload.enabled,
-                enabled_strategy_keys=payload.enabledStrategyKeys,
-            )
-        }
-    except LiveTradingError as exc:
-        _raise_live_error(exc)
-    finally:
-        broker.close()
-        state_store.close()
-
-
-@app.delete("/api/live-trading/orders/{order_id}")
-def live_cancel_order(order_id: str, payload: LiveOrderCancelRequest | None = None) -> dict:
-    broker, state_store = _live_broker()
-    try:
-        _clear_live_trading_cache()
-        return broker.cancel_order(
-            order_id=order_id,
-            variety=(payload.variety if payload else "regular"),
-        )
-    except LiveTradingError as exc:
-        _raise_live_error(exc)
-    except Exception as exc:
-        _raise_live_error(exc)
-    finally:
-        broker.close()
-        state_store.close()
-
-
-@app.get("/api/live-trading/ltp")
-def live_ltp(exchange: str, tradingsymbol: str, preferStream: bool = True) -> dict:
-    broker, state_store = _live_broker()
-    try:
-        return broker.option_ltp(
-            exchange=exchange.strip().upper(),
-            tradingsymbol=tradingsymbol.strip().upper(),
-            prefer_stream=preferStream,
-        )
-    except LiveTradingError as exc:
-        _raise_live_error(exc)
-    except Exception as exc:
-        _raise_live_error(exc)
-    finally:
-        broker.close()
-        state_store.close()
 
 
 @app.get("/api/dhan-live-trading")

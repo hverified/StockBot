@@ -21,8 +21,6 @@ export const WEEKDAY_REPORT_DAYS = [
 ];
 export const BACKTEST_INSTRUMENT_OPTIONS = [
   { id: "NIFTY", label: "NIFTY 50" },
-  { id: "BANKNIFTY", label: "BANK NIFTY" },
-  { id: "SENSEX", label: "SENSEX" },
 ];
 export const BACKTEST_SIGNAL_MODE_OPTIONS = [
   { id: "both", label: "Both ST" },
@@ -44,18 +42,14 @@ export const EXPIRY_OFFSET_OPTIONS = [
 export const STRATEGY_FILTER_OPTIONS = [
   { id: "all", label: "All" },
   { id: "niftyFiveMinute", label: "NIFTY 5m V1" },
-  { id: "niftyFiveMinuteV2", label: "NIFTY 5m V2" },
   { id: "dhanLive", label: "Dhan Live" },
 ];
 export const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
   { id: "niftyFiveMinuteBot", label: "NIFTY 5m Bot V1" },
-  { id: "niftyFiveMinuteBotV2", label: "NIFTY 5m Bot V2" },
   { id: "balance", label: "Balance" },
   { id: "trades", label: "Trades" },
-  { id: "signals", label: "Signals" },
   { id: "reports", label: "Reports" },
-  { id: "liveTrading", label: "Live Trading" },
   { id: "dhanLiveTrading", label: "Dhan Live" },
   { id: "broker", label: "Broker" },
   { id: "logs", label: "Logs" },
@@ -71,7 +65,6 @@ export const DAILY_SETUP_KEYS = {
   niftyOneMinuteBot: "option_contracts_1m",
   sensexOneMinuteBot: "option_contracts_1m_sensex",
   niftyFiveMinuteBot: "option_contracts_5m",
-  niftyFiveMinuteBotV2: "option_contracts_5m_v2",
   dhanNiftyFiveMinuteLive: "dhan_nifty_5m_live",
 };
 export const DEFAULT_DAILY_SETUP_FORM = {

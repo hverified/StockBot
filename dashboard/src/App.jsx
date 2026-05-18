@@ -14,7 +14,6 @@ import {
   MetricCard,
   NAV_OPTIONS,
   OVERVIEW_RANGE_OPTIONS,
-  OptionTypeReport,
   PnlValue,
   STRATEGY_FILTER_OPTIONS,
   TABLE_COLUMN_STORAGE_PREFIX,
@@ -23,7 +22,6 @@ import {
   WeekdayPnlReport,
   apiUrl,
   buildHourlyPnlReport,
-  buildOptionTypeReport,
   buildReportMetrics,
   buildTradeSummaryForRange,
   buildWeekdayPnlReport,
@@ -76,7 +74,6 @@ export function App() {
   const [logsLoading, setLogsLoading] = useState(true);
   const [logsStreamStatus, setLogsStreamStatus] = useState("idle");
   const [actionMessage, setActionMessage] = useState("");
-  const [triggeringSignal, setTriggeringSignal] = useState("");
   const [deletingTradeId, setDeletingTradeId] = useState("");
   const [deleteTradeCandidate, setDeleteTradeCandidate] = useState(null);
   const [selectedDate, setSelectedDate] = useState(getTodayInIst());
@@ -87,7 +84,6 @@ export function App() {
   const [candleStorageBusy, setCandleStorageBusy] = useState(false);
   const [candleStorageResult, setCandleStorageResult] = useState(null);
   const [dhanMasterResult, setDhanMasterResult] = useState(null);
-  const [liveTradingConfirmOpen, setLiveTradingConfirmOpen] = useState(false);
   const [contractForms, setContractForms] = useState({
     option_contracts_1m: { ...DEFAULT_DAILY_SETUP_FORM },
     option_contracts_1m_sensex: {
@@ -100,19 +96,6 @@ export function App() {
       minSignalCandlePct: "2",
       strikeOffset: "100",
       expiryOffset: "0",
-    },
-    option_contracts_5m_v2: {
-      ...DEFAULT_DAILY_SETUP_FORM,
-      targetPct: "8",
-      minSignalCandlePct: "2",
-      strikeOffset: "100",
-      expiryOffset: "0",
-      requireVwap: false,
-      minVolumeMultiplier: "0",
-      volumeLookback: "20",
-      maxEntryGapPct: "0",
-      trailingStopPct: "0",
-      maxTradesPerDay: "0",
     },
     dhan_nifty_5m_live: {
       ...DEFAULT_DAILY_SETUP_FORM,
@@ -221,7 +204,6 @@ export function App() {
   const [backtestGroupAddFeedback, setBacktestGroupAddFeedback] =
     useState(null);
   const [liveActionBusy, setLiveActionBusy] = useState("");
-  const [liveSetupMarket, setLiveSetupMarket] = useState("NIFTY");
   const [dhanManualEntryForm, setDhanManualEntryForm] = useState({
     transactionType: "BUY",
     optionType: "PE",
@@ -283,10 +265,6 @@ export function App() {
     if (!previousPayload) return nextPayload;
     return {
       ...nextPayload,
-      liveTrading: mergeLiveSnapshot(
-        previousPayload.liveTrading,
-        nextPayload.liveTrading,
-      ),
       dhanLiveTrading: mergeLiveSnapshot(
         previousPayload.dhanLiveTrading,
         nextPayload.dhanLiveTrading,
@@ -588,7 +566,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!["overview", "niftyFiveMinuteBot", "niftyFiveMinuteBotV2"].includes(activeView)) {
+    if (!["overview", "niftyFiveMinuteBot"].includes(activeView)) {
       return undefined;
     }
 
@@ -886,60 +864,6 @@ export function App() {
     };
   }, [activeView, selectedDate]);
 
-  async function triggerSampleAlert(signal) {
-    setTriggeringSignal(signal);
-    setActionMessage("");
-    setError("");
-
-    try {
-      const response = await fetch(apiUrl("/api/sample-alert"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ signal }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Sample alert request failed with ${response.status}`);
-      }
-
-      const payload = await response.json();
-      setActionMessage(payload.message ?? `Sample ${signal} alert triggered.`);
-
-      const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
-      if (!dashboardResponse.ok) {
-        throw new Error(
-          `Dashboard refresh failed with ${dashboardResponse.status}`,
-        );
-      }
-
-      const dashboardPayload = await dashboardResponse.json();
-      setData((current) => mergeDashboardPayload(current, dashboardPayload));
-
-      const logsResponse = await fetch(
-        apiUrl(`/api/logs?date=${selectedDate}`),
-      );
-      if (logsResponse.ok) {
-        const logsPayload = await logsResponse.json();
-        setLogs(logsPayload.logs ?? []);
-        setLogsSource(logsPayload.source ?? "none");
-        setLogsMeta({
-          dhanLiveCachedCandle: logsPayload.dhanLiveCachedCandle ?? null,
-        });
-      }
-    } catch (triggerError) {
-      setError(
-        triggerError instanceof Error
-          ? triggerError.message
-          : "Unable to trigger sample alert.",
-      );
-    } finally {
-      setTriggeringSignal("");
-      setLoading(false);
-    }
-  }
-
   function updateBacktestField(field, value) {
     setBacktestForm((current) => ({
       ...current,
@@ -970,13 +894,6 @@ export function App() {
         [field]: normalizedValue,
       },
     }));
-  }
-
-  function updateLiveOptionSide(side) {
-    const contract1 = side === "BOTH" ? "PE" : side;
-    const contract2 = side === "BOTH" ? "CE" : "";
-    updateContractField(liveSetupStrategyKey, "contract1", contract1);
-    updateContractField(liveSetupStrategyKey, "contract2", contract2);
   }
 
   function buildBacktestTradeId(trade) {
@@ -1535,18 +1452,9 @@ export function App() {
     paperTradingByStrategy.option_contracts_1m_sensex ?? {};
   const niftyFiveMinutePaperTrading =
     paperTradingByStrategy.option_contracts_5m ?? {};
-  const niftyFiveMinuteV2PaperTrading =
-    paperTradingByStrategy.option_contracts_5m_v2 ?? {};
   const dhanLivePaperTrading =
     paperTradingByStrategy.dhan_nifty_5m_live ?? {};
   const paperTrading = niftyPaperTrading;
-  const liveTrading = data?.liveTrading ?? {};
-  const liveTradingStatus = liveTrading.status ?? {};
-  const liveOrders = liveTrading.orders ?? [];
-  const liveTrades = liveTrading.trades ?? [];
-  const livePositions = liveTrading.positions ?? {};
-  const liveMargins = liveTrading.margins ?? {};
-  const liveBalance = liveTrading.balance ?? {};
   const dhan = data?.dhan ?? {};
   const dhanLiveTrading = data?.dhanLiveTrading ?? {};
   const dhanLiveStatus = dhanLiveTrading.status ?? {};
@@ -1588,58 +1496,6 @@ export function App() {
   ]
     .filter(Boolean)
     .join(" / ");
-  const livePositionRows = [
-    ...(Array.isArray(livePositions.net) ? livePositions.net : []),
-    ...(Array.isArray(livePositions.day) ? livePositions.day : []),
-  ].filter(
-    (position, index, rows) =>
-      position?.tradingsymbol &&
-      rows.findIndex(
-        (candidate) =>
-          candidate?.tradingsymbol === position.tradingsymbol &&
-          candidate?.product === position.product,
-      ) === index,
-  );
-  const liveMarginRows = [
-    ["Available Cash", liveBalance.cash],
-    ["Live Balance", liveBalance.liveBalance],
-    ["Opening Balance", liveBalance.openingBalance],
-    ["Net Margin", liveBalance.net],
-    ["Used Debits", liveBalance.utilisedDebits],
-    ["SPAN", liveBalance.span],
-    ["Exposure", liveBalance.exposure],
-    ["Collateral", liveBalance.collateral],
-  ];
-  const liveSetupStrategyKey =
-    liveSetupMarket === "SENSEX"
-      ? DAILY_SETUP_KEYS.sensexOneMinuteBot
-      : DAILY_SETUP_KEYS.niftyOneMinuteBot;
-  const liveSetupLabel =
-    liveSetupMarket === "SENSEX" ? "Sensex 1m bot" : "Nifty 1m bot";
-  const liveSelectedSetup =
-    strategyConfig.strategySetups?.[liveSetupStrategyKey] ?? {};
-  const liveSelectedForm =
-    contractForms[liveSetupStrategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
-  const liveEnabledStrategyKeys = Array.isArray(
-    liveTradingStatus.enabledStrategyKeys,
-  )
-    ? liveTradingStatus.enabledStrategyKeys
-    : [];
-  const liveSelectedStrategyEnabled =
-    Boolean(liveTradingStatus.enabled) &&
-    liveEnabledStrategyKeys.includes(liveSetupStrategyKey);
-  const liveSelectedSide =
-    liveSelectedForm.contract1 === "PE" && liveSelectedForm.contract2 === "CE"
-      ? "BOTH"
-      : liveSelectedForm.contract1 === "CE"
-        ? "CE"
-        : "PE";
-  const liveSelectedContracts = [
-    liveSelectedSetup.effectiveContracts?.contract1,
-    liveSelectedSetup.effectiveContracts?.contract2,
-  ]
-    .filter(Boolean)
-    .join(" / ");
   const activeTrade = paperTrading.activeTrade ?? null;
   const niftyActiveTrades =
     paperTrading.activeTrades ?? (activeTrade ? [activeTrade] : []);
@@ -1656,13 +1512,6 @@ export function App() {
     (rawNiftyFiveMinuteActiveTrade ? [rawNiftyFiveMinuteActiveTrade] : []);
   const rawNiftyFiveMinuteTradeHistory =
     niftyFiveMinutePaperTrading.tradeHistory ?? [];
-  const rawNiftyFiveMinuteV2ActiveTrade =
-    niftyFiveMinuteV2PaperTrading.activeTrade ?? null;
-  const rawNiftyFiveMinuteV2ActiveTrades =
-    niftyFiveMinuteV2PaperTrading.activeTrades ??
-    (rawNiftyFiveMinuteV2ActiveTrade ? [rawNiftyFiveMinuteV2ActiveTrade] : []);
-  const rawNiftyFiveMinuteV2TradeHistory =
-    niftyFiveMinuteV2PaperTrading.tradeHistory ?? [];
   const rawDhanLiveActiveTrade = dhanLivePaperTrading.activeTrade ?? null;
   const rawDhanLiveActiveTrades =
     dhanLivePaperTrading.activeTrades ??
@@ -1670,12 +1519,10 @@ export function App() {
   const rawDhanLiveTradeHistory = dhanLivePaperTrading.tradeHistory ?? [];
   const activeTrades = [
     ...rawNiftyFiveMinuteActiveTrades,
-    ...rawNiftyFiveMinuteV2ActiveTrades,
     ...rawDhanLiveActiveTrades,
   ];
   const tradeHistory = [
     ...rawNiftyFiveMinuteTradeHistory,
-    ...rawNiftyFiveMinuteV2TradeHistory,
     ...rawDhanLiveTradeHistory,
   ].sort(
     (first, second) =>
@@ -1686,7 +1533,6 @@ export function App() {
   const zerodha = data?.zerodha ?? {};
   const combinedCapitalBase =
     Number(getPaperPnlBase(niftyFiveMinutePaperTrading) ?? 0) +
-      Number(getPaperPnlBase(niftyFiveMinuteV2PaperTrading) ?? 0) +
       Number(getPaperPnlBase(dhanLivePaperTrading) ?? 0) ||
     Number(getPaperPnlBase(paperTrading) ?? 0);
   const selectedRangeSummary = buildTradeSummaryForRange(
@@ -1799,30 +1645,21 @@ export function App() {
   const isNiftyFiveMinuteLog = (log) =>
     String(log?.strategy_key ?? "").toLowerCase() ===
       DAILY_SETUP_KEYS.niftyFiveMinuteBot ||
-    (String(log?.interval ?? "").toLowerCase() === "5m" &&
-      String(log?.underlying ?? "").toUpperCase() !== "SENSEX" &&
-      String(log?.strategy_key ?? "").toLowerCase() !==
-        DAILY_SETUP_KEYS.niftyFiveMinuteBotV2);
-  const isNiftyFiveMinuteV2Log = (log) =>
-    String(log?.strategy_key ?? "").toLowerCase() ===
-    DAILY_SETUP_KEYS.niftyFiveMinuteBotV2;
+    String(log?.interval ?? "").toLowerCase() === "5m";
   const isDhanLiveLog = (log) =>
     String(log?.strategy_key ?? "").toLowerCase() ===
     DAILY_SETUP_KEYS.dhanNiftyFiveMinuteLive;
   const fiveMinuteLogs = logs.filter(
     (log) =>
       isNiftyFiveMinuteLog(log) ||
-      isNiftyFiveMinuteV2Log(log) ||
       isDhanLiveLog(log),
   );
   const filteredLogs =
     logStrategyFilter === "niftyFiveMinute"
       ? logs.filter(isNiftyFiveMinuteLog)
-      : logStrategyFilter === "niftyFiveMinuteV2"
-        ? logs.filter(isNiftyFiveMinuteV2Log)
-        : logStrategyFilter === "dhanLive"
-          ? logs.filter(isDhanLiveLog)
-          : fiveMinuteLogs;
+      : logStrategyFilter === "dhanLive"
+        ? logs.filter(isDhanLiveLog)
+        : fiveMinuteLogs;
   const selectedLogFilterMeta =
     STRATEGY_FILTER_OPTIONS.find((option) => option.id === logStrategyFilter) ??
     STRATEGY_FILTER_OPTIONS[0];
@@ -1922,9 +1759,6 @@ export function App() {
   const isNiftyFiveMinuteOptionTrade = (trade) =>
     (trade?.strategy_key ?? trade?.strategyKey) ===
     DAILY_SETUP_KEYS.niftyFiveMinuteBot;
-  const isNiftyFiveMinuteV2OptionTrade = (trade) =>
-    (trade?.strategy_key ?? trade?.strategyKey) ===
-    DAILY_SETUP_KEYS.niftyFiveMinuteBotV2;
   const isDhanLiveTrade = (trade) =>
     (trade?.strategy_key ?? trade?.strategyKey) ===
       DAILY_SETUP_KEYS.dhanNiftyFiveMinuteLive ||
@@ -1944,17 +1778,12 @@ export function App() {
   const niftyFiveMinuteActiveTrades = rawNiftyFiveMinuteActiveTrades.filter(
     isNiftyFiveMinuteOptionTrade,
   );
-  const niftyFiveMinuteV2OptionTrades =
-    rawNiftyFiveMinuteV2TradeHistory.filter(isNiftyFiveMinuteV2OptionTrade);
-  const niftyFiveMinuteV2ActiveTrades =
-    rawNiftyFiveMinuteV2ActiveTrades.filter(isNiftyFiveMinuteV2OptionTrade);
   const dhanLiveOptionTrades = rawDhanLiveTradeHistory.filter(isDhanLiveTrade);
   const dhanLiveActiveTrades = rawDhanLiveActiveTrades.filter(isDhanLiveTrade);
   const filterTradesByStrategy = (filterId) => {
     if (filterId === "niftyOneMinute") return oneMinuteOptionTrades;
     if (filterId === "sensexOneMinute") return sensexOneMinuteOptionTrades;
     if (filterId === "niftyFiveMinute") return niftyFiveMinuteOptionTrades;
-    if (filterId === "niftyFiveMinuteV2") return niftyFiveMinuteV2OptionTrades;
     if (filterId === "dhanLive") return dhanLiveOptionTrades;
     return tradeHistory;
   };
@@ -1978,7 +1807,6 @@ export function App() {
     (trade) => String(trade.status ?? "").toUpperCase() === "LOSS",
   ).length;
   const weekdayPnlReport = buildWeekdayPnlReport(reportTrades, overviewRange);
-  const optionTypeReport = buildOptionTypeReport(reportTrades, overviewRange);
 
   function buildBotPageSummary(trades, currentActiveTrades) {
     const rangeTrades = filterTradesForRange(trades, overviewRange);
@@ -2018,10 +1846,6 @@ export function App() {
     niftyFiveMinuteOptionTrades,
     niftyFiveMinuteActiveTrades,
   );
-  const niftyFiveMinuteV2BotSummary = buildBotPageSummary(
-    niftyFiveMinuteV2OptionTrades,
-    niftyFiveMinuteV2ActiveTrades,
-  );
   const overviewBotCards = [
     {
       label: "NIFTY 5m V1",
@@ -2034,18 +1858,6 @@ export function App() {
         strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.niftyFiveMinuteBot] ??
         {},
     },
-    {
-      label: "NIFTY 5m V2",
-      strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBotV2,
-      paperTrading: niftyFiveMinuteV2PaperTrading,
-      activeTrades: niftyFiveMinuteV2ActiveTrades,
-      summary: niftyFiveMinuteV2BotSummary,
-      trendLog: latestNiftyTrendLog,
-      setup:
-        strategyConfig.strategySetups?.[
-          DAILY_SETUP_KEYS.niftyFiveMinuteBotV2
-        ] ?? {},
-    },
   ];
   const balanceCards = [
     {
@@ -2056,23 +1868,6 @@ export function App() {
       activeTrades: niftyFiveMinuteActiveTrades,
       summary: niftyFiveMinuteBotSummary,
     },
-    {
-      label: "NIFTY 5m V2 Bank Balance",
-      shortLabel: "V2",
-      strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBotV2,
-      paperTrading: niftyFiveMinuteV2PaperTrading,
-      activeTrades: niftyFiveMinuteV2ActiveTrades,
-      summary: niftyFiveMinuteV2BotSummary,
-    },
-  ];
-  const signalAlertColumns = [
-    { id: "signal", label: "Signal" },
-    { id: "optionSymbol", label: "Contract" },
-    { id: "close", label: "Close" },
-    { id: "st_10_1", label: "ST (10,1)" },
-    { id: "st_10_3", label: "ST (10,3)" },
-    { id: "candleTime", label: "Candle Time" },
-    { id: "alertTime", label: "Alert Time" },
   ];
   const tradeHistoryColumns = [
     { id: "signal", label: "Signal" },
@@ -2146,9 +1941,6 @@ export function App() {
     { id: "exitReason", label: "Exit Reason" },
     { id: "executionSource", label: "Source" },
   ];
-  const [selectedSignalAlertColumns, setSelectedSignalAlertColumns] = useState(
-    () => loadSelectedColumns("signal-alerts", signalAlertColumns),
-  );
   const [selectedTradeHistoryColumns, setSelectedTradeHistoryColumns] =
     useState(() => loadSelectedColumns("trade-history", tradeHistoryColumns));
   const [selectedRunLogColumns, setSelectedRunLogColumns] = useState(() =>
@@ -2163,13 +1955,6 @@ export function App() {
     );
   const [tablePages, setTablePages] = useState({});
   const [tablePageSizes, setTablePageSizes] = useState({});
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      `${TABLE_COLUMN_STORAGE_PREFIX}signal-alerts`,
-      JSON.stringify(selectedSignalAlertColumns),
-    );
-  }, [selectedSignalAlertColumns]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -2310,9 +2095,6 @@ export function App() {
     return symbol.includes("SENSEX") ? "sensex" : "nifty";
   }
 
-  const visibleSignalAlertColumns = signalAlertColumns.filter((column) =>
-    selectedSignalAlertColumns.includes(column.id),
-  );
   const visibleTradeHistoryColumns = tradeHistoryColumns.filter((column) =>
     selectedTradeHistoryColumns.includes(column.id),
   );
@@ -2322,14 +2104,11 @@ export function App() {
   const visibleBacktestTradeColumns = backtestTradeColumns.filter((column) =>
     selectedBacktestTradeColumns.includes(column.id),
   );
-  const overviewAlertsTable = paginateRows("overview-alerts", recentAlerts);
-  const signalsTable = paginateRows("signal-alerts", recentAlerts);
   const overviewTradeHistoryTable = paginateRows(
     "overview-trades",
     tradeHistory,
   );
   const tradeHistoryTable = paginateRows("trade-history", filteredTradeHistory);
-  const liveOrdersTable = paginateRows("live-orders", liveOrders);
   const backtestTradesTable = paginateRows("backtest-trades", backtestTrades);
   const backtestGroupTradesTable = paginateRows(
     "backtest-group-trades",
@@ -2446,18 +2225,6 @@ export function App() {
     setData((current) => mergeDashboardPayload(current, payload));
   }
 
-  async function refreshLiveTradingData() {
-    const response = await fetch(apiUrl("/api/live-trading"));
-    if (!response.ok) {
-      throw new Error(`Live trading refresh failed with ${response.status}`);
-    }
-    const livePayload = await response.json();
-    setData((current) => ({
-      ...(current ?? {}),
-      liveTrading: livePayload,
-    }));
-  }
-
   async function refreshDhanLiveTradingData({
     positionsOnly = false,
     silent = false,
@@ -2499,51 +2266,6 @@ export function App() {
       if (!silent) {
         setLiveActionBusy("");
       }
-    }
-  }
-
-  async function toggleLiveTrading(enabled) {
-    setLiveActionBusy("toggle");
-    setError("");
-    setActionMessage("");
-    try {
-      const response = await fetch(apiUrl("/api/live-trading/toggle"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          enabled,
-          enabledStrategyKeys: enabled
-            ? [liveSetupStrategyKey]
-            : liveEnabledStrategyKeys,
-        }),
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(
-          payload.detail ??
-            `Live trading toggle failed with ${response.status}`,
-        );
-      }
-      setActionMessage(
-        enabled ? "Live trading enabled." : "Live trading disabled.",
-      );
-      setLiveTradingConfirmOpen(false);
-      const payload = await response.json().catch(() => ({}));
-      setData((current) => ({
-        ...(current ?? {}),
-        liveTrading: {
-          ...((current ?? {}).liveTrading ?? {}),
-          status: payload.status ?? {},
-        },
-      }));
-    } catch (liveError) {
-      setError(
-        liveError instanceof Error
-          ? liveError.message
-          : "Unable to update live trading.",
-      );
-    } finally {
-      setLiveActionBusy("");
     }
   }
 
@@ -2703,38 +2425,6 @@ export function App() {
     }
   }
 
-  async function cancelLiveOrder(orderId) {
-    setLiveActionBusy(`cancel-${orderId}`);
-    setError("");
-    setActionMessage("");
-    try {
-      const response = await fetch(
-        apiUrl(`/api/live-trading/orders/${orderId}`),
-        {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ variety: "regular" }),
-        },
-      );
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(
-          payload.detail ?? `Order cancel failed with ${response.status}`,
-        );
-      }
-      setActionMessage(`Live order cancelled: ${orderId}`);
-      await refreshLiveTradingData();
-    } catch (liveError) {
-      setError(
-        liveError instanceof Error
-          ? liveError.message
-          : "Unable to cancel live order.",
-      );
-    } finally {
-      setLiveActionBusy("");
-    }
-  }
-
   function renderBotPage({
     eyebrow,
     title,
@@ -2753,7 +2443,6 @@ export function App() {
       data?.strategyConfig?.strategySetups?.[strategyKey] ?? {};
     const setupLabel = setupConfig.label ?? "1m option bot";
     const isFiveMinuteSetup = setupLabel.includes("5m");
-    const isV2Setup = strategyKey === DAILY_SETUP_KEYS.niftyFiveMinuteBotV2;
     const intervalLabel = isFiveMinuteSetup ? "5m" : "1m";
     const addMoneyAmount = addMoneyAmounts[strategyKey] ?? "";
     const setupTitle = showContracts
@@ -3269,109 +2958,6 @@ export function App() {
                       }
                     />
                   </label>
-                  {isV2Setup ? (
-                    <details className="advanced-backtest-fields" open>
-                      <summary>V2 advanced filters</summary>
-                      <label className="toggle-control">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(setupForm.requireVwap)}
-                          onChange={(event) =>
-                            updateContractField(
-                              strategyKey,
-                              "requireVwap",
-                              event.target.checked,
-                            )
-                          }
-                        />
-                        <span>Close below VWAP</span>
-                      </label>
-                      <label className="form-field">
-                        Volume Multiplier
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.1"
-                          value={setupForm.minVolumeMultiplier}
-                          placeholder="0 disables"
-                          onChange={(event) =>
-                            updateContractField(
-                              strategyKey,
-                              "minVolumeMultiplier",
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                      <label className="form-field">
-                        Volume Lookback
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          value={setupForm.volumeLookback}
-                          onChange={(event) =>
-                            updateContractField(
-                              strategyKey,
-                              "volumeLookback",
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                      <label className="form-field">
-                        Max Entry Gap %
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.1"
-                          value={setupForm.maxEntryGapPct}
-                          placeholder="0 disables"
-                          onChange={(event) =>
-                            updateContractField(
-                              strategyKey,
-                              "maxEntryGapPct",
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                      <label className="form-field">
-                        Trailing SL %
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.1"
-                          value={setupForm.trailingStopPct}
-                          placeholder="0 disables"
-                          onChange={(event) =>
-                            updateContractField(
-                              strategyKey,
-                              "trailingStopPct",
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                      <label className="form-field">
-                        Max Trades / Day
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={setupForm.maxTradesPerDay}
-                          placeholder="0 disables"
-                          onChange={(event) =>
-                            updateContractField(
-                              strategyKey,
-                              "maxTradesPerDay",
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                    </details>
-                  ) : null}
                 </>
               ) : null}
               <button
@@ -3460,30 +3046,6 @@ export function App() {
                     (option) =>
                       option.id === String(setupConfig.expiryOffset ?? "0"),
                   )?.label ?? "Nearest expiry"}
-                </dd>
-              </div>
-            ) : null}
-            {isV2Setup ? (
-              <div>
-                <dt>Advanced Filters</dt>
-                <dd>
-                  {[
-                    setupConfig.requireVwap ? "VWAP" : null,
-                    Number(setupConfig.minVolumeMultiplier) > 0
-                      ? `Vol ${setupConfig.minVolumeMultiplier}x`
-                      : null,
-                    Number(setupConfig.maxEntryGapPct) > 0
-                      ? `Gap ${setupConfig.maxEntryGapPct}%`
-                      : null,
-                    Number(setupConfig.trailingStopPct) > 0
-                      ? `Trail ${setupConfig.trailingStopPct}%`
-                      : null,
-                    Number(setupConfig.maxTradesPerDay) > 0
-                      ? `Cap ${setupConfig.maxTradesPerDay}`
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" / ") || "Off"}
                 </dd>
               </div>
             ) : null}
@@ -3596,47 +3158,34 @@ export function App() {
               ? "Feed"
               : activeView === "niftyOneMinuteBot" ||
                   activeView === "sensexOneMinuteBot" ||
-                  activeView === "niftyFiveMinuteBot" ||
-                  activeView === "niftyFiveMinuteBotV2"
+                  activeView === "niftyFiveMinuteBot"
                 ? "Bot"
                 : activeView === "trades"
                   ? "History"
-                  : activeView === "signals"
-                    ? "Alerts"
-                    : activeView === "reports"
-                      ? "Report range"
-                      : activeView === "backtestGroups"
-                        ? "Saved set"
-                      : activeView === "broker"
-                        ? "Zerodha"
-                        : activeView === "liveTrading"
-                          ? "Live"
-                          : "Selected date"}
+                  : activeView === "reports"
+                    ? "Report range"
+                    : activeView === "backtestGroups"
+                      ? "Saved set"
+                    : activeView === "broker"
+                      ? "Zerodha"
+                      : "Selected date"}
           </span>
           <strong>
             {activeView === "overview"
               ? streamStatus
               : activeView === "niftyFiveMinuteBot"
                 ? "NIFTY 5m V1"
-                : activeView === "niftyFiveMinuteBotV2"
-                  ? "NIFTY 5m V2"
-                  : activeView === "trades"
-                    ? `${formatCount(tradeHistory.length)} trades`
-                    : activeView === "signals"
-                      ? `${formatCount(recentAlerts.length)} alerts`
-                      : activeView === "reports"
-                        ? selectedRangeMeta.label
-                        : activeView === "backtestGroups"
-                          ? `${formatCount(activeBacktestGroupTrades.length)} trades`
-                        : activeView === "broker"
-                          ? zerodha.health?.ok
-                            ? "Working"
-                            : "Check needed"
-                          : activeView === "liveTrading"
-                            ? liveTradingStatus.enabled
-                              ? "Enabled"
-                              : "Disabled"
-                            : selectedDate}
+                : activeView === "trades"
+                  ? `${formatCount(tradeHistory.length)} trades`
+                  : activeView === "reports"
+                    ? selectedRangeMeta.label
+                    : activeView === "backtestGroups"
+                      ? `${formatCount(activeBacktestGroupTrades.length)} trades`
+                      : activeView === "broker"
+                        ? zerodha.health?.ok
+                          ? "Working"
+                          : "Check needed"
+                        : selectedDate}
           </strong>
         </div>
       </section>
@@ -3751,128 +3300,6 @@ export function App() {
           </section>
         </div>
       ) : null}
-      {liveTradingConfirmOpen ? (
-        <div className="confirm-overlay" role="presentation">
-          <section
-            className="confirm-dialog confirm-dialog--live"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="live-trading-confirm-title"
-          >
-            <div
-              className="confirm-dialog__icon confirm-dialog__icon--live"
-              aria-hidden="true"
-            >
-              L
-            </div>
-            <div>
-              <p className="eyebrow">Live Trading</p>
-              <h2 id="live-trading-confirm-title">Turn on live orders?</h2>
-              <p className="confirm-dialog__copy">
-                Please confirm the selected setup before Tradewise can place
-                real Zerodha orders for this strategy.
-              </p>
-            </div>
-            <dl className="confirm-dialog__details">
-              <div>
-                <dt>Market</dt>
-                <dd>{liveSetupMarket}</dd>
-              </div>
-              <div>
-                <dt>Option Side</dt>
-                <dd>
-                  {liveSelectedSide === "BOTH" ? "PE / CE" : liveSelectedSide}
-                </dd>
-              </div>
-              <div>
-                <dt>Contracts</dt>
-                <dd>{liveSelectedContracts || "Not set"}</dd>
-              </div>
-              <div>
-                <dt>Window</dt>
-                <dd>
-                  {liveSelectedForm.scheduleStart || "-"} to{" "}
-                  {liveSelectedForm.scheduleEnd || "-"}
-                </dd>
-              </div>
-              <div>
-                <dt>Entry Signal</dt>
-                <dd>{liveSelectedForm.entrySignal || "BUY"}</dd>
-              </div>
-              <div>
-                <dt>Target / SL</dt>
-                <dd>
-                  {liveSelectedForm.targetPct || "-"}% /{" "}
-                  {formatSnakeLabel(
-                    liveSelectedForm.stopLossMode || "signal_low",
-                  )}
-                  {liveSelectedForm.stopLossMode === "percent"
-                    ? ` ${liveSelectedForm.stopLossPct || "-"}%`
-                    : ""}
-                </dd>
-              </div>
-              <div>
-                <dt>Max Body</dt>
-                <dd>{liveSelectedForm.maxSignalCandlePct || "-"}%</dd>
-              </div>
-              <div>
-                <dt>Offset</dt>
-                <dd>{liveSelectedForm.strikeOffset || "0"}</dd>
-              </div>
-              <div>
-                <dt>Expiry</dt>
-                <dd>
-                  {EXPIRY_OFFSET_OPTIONS.find(
-                    (option) =>
-                      option.id === String(liveSelectedForm.expiryOffset ?? "0"),
-                  )?.label ?? "Nearest expiry"}
-                </dd>
-              </div>
-              <div>
-                <dt>Broker Cash</dt>
-                <dd>
-                  {liveBalance.cash == null
-                    ? "Not available"
-                    : formatCurrency(liveBalance.cash)}
-                </dd>
-              </div>
-              <div>
-                <dt>Status</dt>
-                <dd>
-                  {liveTradingStatus.zerodhaReady
-                    ? "Zerodha ready"
-                    : "Zerodha not ready"}{" "}
-                  ·{" "}
-                  {liveSelectedSetup.usesDailySetup
-                    ? "Setup saved"
-                    : "Setup not saved"}
-                </dd>
-              </div>
-            </dl>
-            <div className="confirm-dialog__actions">
-              <button
-                type="button"
-                className="action-button action-button--ghost"
-                onClick={() => setLiveTradingConfirmOpen(false)}
-                disabled={liveActionBusy === "toggle"}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="action-button action-button--buy"
-                onClick={() => toggleLiveTrading(true)}
-                disabled={liveActionBusy === "toggle"}
-              >
-                {liveActionBusy === "toggle"
-                  ? "Turning on..."
-                  : "Confirm & Turn On"}
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
-
       {activeView === "overview" ? (
         <>
           <section id="market-overview" className="section-block">
@@ -4168,133 +3595,6 @@ export function App() {
                   </dl>
                 </article>
 
-                <article className="panel">
-                  <div className="panel-header">
-                    <div>
-                      <p className="panel-title">Signal Alerts</p>
-                    </div>
-                    <ColumnPicker
-                      label="Signal Alerts"
-                      columns={signalAlertColumns}
-                      selected={selectedSignalAlertColumns}
-                      onToggle={(columnId) =>
-                        toggleColumn(
-                          columnId,
-                          selectedSignalAlertColumns,
-                          setSelectedSignalAlertColumns,
-                          signalAlertColumns,
-                        )
-                      }
-                      onReset={() =>
-                        setSelectedSignalAlertColumns(
-                          signalAlertColumns.map((column) => column.id),
-                        )
-                      }
-                    />
-                  </div>
-
-                  <div className="action-row">
-                    <button
-                      type="button"
-                      className="action-button action-button--buy"
-                      onClick={() => triggerSampleAlert("BUY")}
-                      disabled={triggeringSignal !== ""}
-                    >
-                      {triggeringSignal === "BUY"
-                        ? "Sending BUY..."
-                        : "Send Sample BUY"}
-                    </button>
-                    <button
-                      type="button"
-                      className="action-button action-button--sell"
-                      onClick={() => triggerSampleAlert("SELL")}
-                      disabled={triggeringSignal !== ""}
-                    >
-                      {triggeringSignal === "SELL"
-                        ? "Sending SELL..."
-                        : "Send Sample SELL"}
-                    </button>
-                  </div>
-
-                  {recentAlerts.length ? (
-                    <>
-                      <div className="table-wrap">
-                        <table className="table-alerts table-auto-fit">
-                          <thead>
-                            <tr>
-                              {visibleSignalAlertColumns.map((column) => (
-                                <th key={column.id}>{column.label}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {overviewAlertsTable.rows.map((alert) => (
-                              <tr
-                                key={`${alert.alertTime}-${alert.signal}-${alert.close}`}
-                              >
-                                {visibleSignalAlertColumns.map((column) => {
-                                  if (column.id === "signal")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatSignal(alert.signal)}
-                                      </td>
-                                    );
-                                  if (column.id === "optionSymbol")
-                                    return (
-                                      <td key={column.id}>
-                                        {alert.optionSymbol ??
-                                          alert.symbol ??
-                                          "-"}
-                                      </td>
-                                    );
-                                  if (column.id === "close")
-                                    return (
-                                      <td key={column.id}>
-                                        {alert.close?.toFixed(2)}
-                                      </td>
-                                    );
-                                  if (column.id === "st_10_1")
-                                    return (
-                                      <td key={column.id}>
-                                        {alert.st_10_1?.toFixed(2)}
-                                      </td>
-                                    );
-                                  if (column.id === "st_10_3")
-                                    return (
-                                      <td key={column.id}>
-                                        {alert.st_10_3?.toFixed(2)}
-                                      </td>
-                                    );
-                                  if (column.id === "candleTime")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatTableDateTime(alert.candleTime)}
-                                      </td>
-                                    );
-                                  if (column.id === "alertTime")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatTableDateTime(alert.alertTime)}
-                                      </td>
-                                    );
-                                  return <td key={column.id}>-</td>;
-                                })}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                      <PaginationControls
-                        {...overviewAlertsTable.pagination.controls}
-                      />
-                    </>
-                  ) : (
-                    <p className="empty-copy">
-                      Recent alerts will appear here once the bot sends or tests
-                      a signal.
-                    </p>
-                  )}
-                </article>
               </section>
 
               <section className="panel">
@@ -4483,20 +3783,6 @@ export function App() {
           summary: niftyFiveMinuteBotSummary,
           showContracts: true,
           botPaperTrading: niftyFiveMinutePaperTrading,
-        })
-      ) : activeView === "niftyFiveMinuteBotV2" ? (
-        renderBotPage({
-          eyebrow: "NIFTY 5-Minute Option Bot V2",
-          title: "NIFTY 5m V2 advanced-filter execution",
-          subtitle:
-            "Separate NIFTY 5m lane with VWAP, volume, entry-gap, trailing stop, and trade-cap filters.",
-          scheduleLabel: "Every 5 min at +2s",
-          strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBotV2,
-          trades: niftyFiveMinuteV2OptionTrades,
-          currentActiveTrades: niftyFiveMinuteV2ActiveTrades,
-          summary: niftyFiveMinuteV2BotSummary,
-          showContracts: true,
-          botPaperTrading: niftyFiveMinuteV2PaperTrading,
         })
       ) : activeView === "balance" ? (
         <section className="section-block">
@@ -4829,137 +4115,6 @@ export function App() {
               <p className="empty-copy">
                 No completed paper trades found for{" "}
                 {selectedTradeFilterMeta.label}.
-              </p>
-            )}
-          </section>
-        </section>
-      ) : activeView === "signals" ? (
-        <section className="section-block">
-          <div className="section-heading">
-            <p className="eyebrow">Signals</p>
-            <h2 className="section-title">Signal alerts</h2>
-          </div>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">Recent Signal Alerts</p>
-              </div>
-              <ColumnPicker
-                label="Signal Alerts"
-                columns={signalAlertColumns}
-                selected={selectedSignalAlertColumns}
-                onToggle={(columnId) =>
-                  toggleColumn(
-                    columnId,
-                    selectedSignalAlertColumns,
-                    setSelectedSignalAlertColumns,
-                    signalAlertColumns,
-                  )
-                }
-                onReset={() =>
-                  setSelectedSignalAlertColumns(
-                    signalAlertColumns.map((column) => column.id),
-                  )
-                }
-              />
-            </div>
-
-            <div className="action-row">
-              <button
-                type="button"
-                className="action-button action-button--buy"
-                onClick={() => triggerSampleAlert("BUY")}
-                disabled={triggeringSignal !== ""}
-              >
-                {triggeringSignal === "BUY"
-                  ? "Sending BUY..."
-                  : "Send Sample BUY"}
-              </button>
-              <button
-                type="button"
-                className="action-button action-button--sell"
-                onClick={() => triggerSampleAlert("SELL")}
-                disabled={triggeringSignal !== ""}
-              >
-                {triggeringSignal === "SELL"
-                  ? "Sending SELL..."
-                  : "Send Sample SELL"}
-              </button>
-            </div>
-
-            {recentAlerts.length ? (
-              <>
-                <div className="table-wrap">
-                  <table className="table-alerts table-auto-fit">
-                    <thead>
-                      <tr>
-                        {visibleSignalAlertColumns.map((column) => (
-                          <th key={column.id}>{column.label}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {signalsTable.rows.map((alert) => (
-                        <tr
-                          key={`${alert.alertTime}-${alert.signal}-${alert.close}`}
-                        >
-                          {visibleSignalAlertColumns.map((column) => {
-                            if (column.id === "signal")
-                              return (
-                                <td key={column.id}>
-                                  {formatSignal(alert.signal)}
-                                </td>
-                              );
-                            if (column.id === "optionSymbol")
-                              return (
-                                <td key={column.id}>
-                                  {alert.optionSymbol ?? alert.symbol ?? "-"}
-                                </td>
-                              );
-                            if (column.id === "close")
-                              return (
-                                <td key={column.id}>
-                                  {alert.close?.toFixed(2)}
-                                </td>
-                              );
-                            if (column.id === "st_10_1")
-                              return (
-                                <td key={column.id}>
-                                  {alert.st_10_1?.toFixed(2)}
-                                </td>
-                              );
-                            if (column.id === "st_10_3")
-                              return (
-                                <td key={column.id}>
-                                  {alert.st_10_3?.toFixed(2)}
-                                </td>
-                              );
-                            if (column.id === "candleTime")
-                              return (
-                                <td key={column.id}>
-                                  {formatTableDateTime(alert.candleTime)}
-                                </td>
-                              );
-                            if (column.id === "alertTime")
-                              return (
-                                <td key={column.id}>
-                                  {formatTableDateTime(alert.alertTime)}
-                                </td>
-                              );
-                            return <td key={column.id}>-</td>;
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <PaginationControls {...signalsTable.pagination.controls} />
-              </>
-            ) : (
-              <p className="empty-copy">
-                Recent alerts will appear here once the bot sends or tests a
-                signal.
               </p>
             )}
           </section>
@@ -6528,14 +5683,6 @@ export function App() {
             <WeekdayPnlReport buckets={weekdayPnlReport} />
           </section>
 
-          <section className="panel pnl-report-panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">CE / PE Trade Details</p>
-              </div>
-            </div>
-            <OptionTypeReport buckets={optionTypeReport} />
-          </section>
         </section>
       ) : activeView === "backtest" ? (
         <section className="section-block">
@@ -7115,35 +6262,6 @@ export function App() {
               onSubmit={runNiftyFiveMinuteBacktest}
             >
               <div className="form-field segmented-field">
-                <span>Instrument</span>
-                <div
-                  className="segmented-toggle"
-                  role="group"
-                  aria-label="5m backtest instrument"
-                >
-                  {BACKTEST_INSTRUMENT_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`segmented-toggle__button ${
-                        niftyFiveMinuteBacktestForm.instrument === option.id
-                          ? "segmented-toggle__button--active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        updateNiftyFiveMinuteBacktestField(
-                          "instrument",
-                          option.id,
-                        )
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="form-field segmented-field">
                 <span>Contract Mode</span>
                 <div
                   className="segmented-toggle"
@@ -7179,13 +6297,7 @@ export function App() {
                     <input
                       type="text"
                       value={niftyFiveMinuteBacktestForm.contract1}
-                      placeholder={
-                        niftyFiveMinuteBacktestForm.instrument === "SENSEX"
-                          ? "76000PE"
-                          : niftyFiveMinuteBacktestForm.instrument === "BANKNIFTY"
-                            ? "56000PE"
-                          : "24000PE"
-                      }
+                      placeholder="24000PE"
                       onChange={(event) =>
                         updateNiftyFiveMinuteBacktestField(
                           "contract1",
@@ -7200,13 +6312,7 @@ export function App() {
                     <input
                       type="text"
                       value={niftyFiveMinuteBacktestForm.contract2}
-                      placeholder={
-                        niftyFiveMinuteBacktestForm.instrument === "SENSEX"
-                          ? "76200CE"
-                          : niftyFiveMinuteBacktestForm.instrument === "BANKNIFTY"
-                            ? "56200CE"
-                          : "24300CE"
-                      }
+                      placeholder="24300CE"
                       onChange={(event) =>
                         updateNiftyFiveMinuteBacktestField(
                           "contract2",
@@ -7250,12 +6356,7 @@ export function App() {
                     <span>Strike Offset</span>
                     <input
                       type="number"
-                      step={
-                        niftyFiveMinuteBacktestForm.instrument === "SENSEX" ||
-                        niftyFiveMinuteBacktestForm.instrument === "BANKNIFTY"
-                          ? "100"
-                          : "50"
-                      }
+                      step="50"
                       value={niftyFiveMinuteBacktestForm.strikeOffset}
                       placeholder="0, 100, -100"
                       onChange={(event) =>
@@ -7524,7 +6625,7 @@ export function App() {
               >
                 {niftyFiveMinuteBacktestLoading
                   ? "Running..."
-                  : `Run ${niftyFiveMinuteBacktestForm.instrument} 5m Backtest`}
+                  : "Run NIFTY 5m Backtest"}
               </button>
             </form>
           </section>

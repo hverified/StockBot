@@ -643,6 +643,8 @@ def _resolve_long_stop_loss(
 def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestRequest) -> dict[str, Any]:
     start_date = datetime.fromisoformat(request.start_date).date()
     end_date = datetime.fromisoformat(request.end_date).date()
+    if str(request.instrument).upper() != "NIFTY":
+        raise ValueError("5m option backtest now supports NIFTY only.")
     if end_date < start_date:
         raise ValueError("Exit day must be on or after entry day.")
 
