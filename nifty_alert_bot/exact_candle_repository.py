@@ -177,3 +177,25 @@ class ExactCandleRepository:
             ]
         )
         return list(rows)
+
+    def latest_candle(
+        self,
+        *,
+        underlying: str,
+        trade_date: str,
+        interval: str = "minute",
+    ) -> dict[str, Any] | None:
+        try:
+            row = self.collection.find_one(
+                {
+                    "underlying": underlying.upper(),
+                    "trade_date": trade_date,
+                    "interval": interval,
+                },
+                {"_id": 0},
+                sort=[("candle_time", -1)],
+            )
+            return row if isinstance(row, dict) else None
+        except Exception:
+            logger.exception("Failed to load latest exact option candle for %s on %s.", underlying, trade_date)
+            return None

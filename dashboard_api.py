@@ -4,9 +4,10 @@ import asyncio
 import csv
 import json
 import os
+import struct
 from datetime import datetime, timedelta
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -14,23 +15,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+try:
+    import websockets
+except ImportError:  # pragma: no cover - optional runtime dependency
+    websockets = None
+
 from nifty_alert_bot.backtesting import (
     BacktestRequest as EngineBacktestRequest,
     FiveMinuteOptionBacktestRequest,
-    OptionContractBacktestRequest,
     run_backtest,
     run_five_minute_option_backtest,
-    run_option_contract_backtest,
 )
 from nifty_alert_bot.config import get_settings
+from nifty_alert_bot.exact_candle_collector import collect_exact_option_candles
+from nifty_alert_bot.exact_candle_repository import ExactCandleRepository
 from nifty_alert_bot.bot import (
+    DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
     NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+    NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
     OPTION_CONTRACT_STRATEGY_KEY,
-    SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
     SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
     build_state_store,
     option_strategy_settings_for_key,
     send_sample_alert,
+)
+from nifty_alert_bot.dhan_trading import (
+    DhanLiveTradingBroker,
+    DhanTradingError,
+    dhan_exit_side_for_quantity,
+    dhan_position_quantity,
 )
 from nifty_alert_bot.live_trading import LiveTradingBroker, LiveTradingError
 from nifty_alert_bot.option_price_provider import OptionPriceProvider
@@ -53,12 +66,28 @@ _LIVE_TRADING_SNAPSHOT_CACHE: dict[str, Any] = {
     "expires_at": None,
     "payload": None,
 }
+_DHAN_LIVE_TRADING_SNAPSHOT_CACHE: dict[str, Any] = {
+    "expires_at": None,
+    "payload": None,
+}
 _LIVE_TRADING_SNAPSHOT_TTL_SECONDS = 10
 _OPTION_EXPIRY_CACHE: dict[str, Any] = {
     "expires_at": None,
     "items": {},
 }
 _OPTION_EXPIRY_CACHE_TTL_SECONDS = 60 * 60 * 6
+_MARKET_QUOTES_CACHE: dict[str, Any] = {
+    "expires_at": None,
+    "payload": None,
+}
+_ZERODHA_HEALTH_CACHE: dict[str, Any] = {
+    "expires_at": None,
+    "payload": None,
+}
+_ACTIVE_TRADE_QUOTE_CACHE: dict[str, Any] = {}
+_MARKET_QUOTES_CACHE_TTL_SECONDS = 8
+_ZERODHA_HEALTH_CACHE_TTL_SECONDS = 60
+_ACTIVE_TRADE_QUOTE_CACHE_TTL_SECONDS = 5
 
 
 class SampleAlertRequest(BaseModel):
@@ -70,8 +99,21 @@ class ZerodhaExchangeRequest(BaseModel):
     saveToEnv: bool = True
 
 
+class ManualCandleStorageRequest(BaseModel):
+    instrument: Literal["ALL", "NIFTY", "SENSEX"] = "ALL"
+
+
+StrategyKeyLiteral = Literal[
+    "option_contracts_1m",
+    "option_contracts_1m_sensex",
+    "option_contracts_5m",
+    "option_contracts_5m_v2",
+    "dhan_nifty_5m_live",
+]
+
+
 class StrategyContractsRequest(BaseModel):
-    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex", "option_contracts_5m", "option_contracts_5m_sensex"] = "option_contracts_1m"
+    strategyKey: StrategyKeyLiteral = "option_contracts_1m"
     contractMode: Literal["fixed", "dynamic"] | None = "dynamic"
     contract1: str
     contract2: str
@@ -82,20 +124,27 @@ class StrategyContractsRequest(BaseModel):
     maxSignalCandlePct: float | None = None
     minSignalCandlePct: float | None = None
     strikeOffset: int | None = None
+    expiryOffset: int | None = None
     entrySignal: Literal["BUY", "SELL", "BOTH"] | None = None
     stopLossMode: Literal["signal_low", "percent"] | None = None
     stopLossPct: float | None = None
+    requireVwap: bool | None = None
+    minVolumeMultiplier: float | None = None
+    volumeLookback: int | None = None
+    maxEntryGapPct: float | None = None
+    trailingStopPct: float | None = None
+    maxTradesPerDay: int | None = None
 
 
 class AddPaperBalanceRequest(BaseModel):
     amount: float
-    strategyKey: Literal["option_contracts_1m", "option_contracts_1m_sensex", "option_contracts_5m", "option_contracts_5m_sensex"] = "option_contracts_1m"
+    strategyKey: StrategyKeyLiteral = "option_contracts_1m"
 
 
 class LiveTradingToggleRequest(BaseModel):
     enabled: bool
     enabledStrategyKeys: list[
-        Literal["option_contracts_1m", "option_contracts_1m_sensex", "option_contracts_5m", "option_contracts_5m_sensex"]
+        StrategyKeyLiteral
     ] | None = None
 
 
@@ -103,8 +152,30 @@ class LiveOrderCancelRequest(BaseModel):
     variety: str = "regular"
 
 
+class DhanLivePositionExitRequest(BaseModel):
+    securityId: str
+    tradingSymbol: str
+    exchangeSegment: str = "NSE_FNO"
+    productType: str = "INTRADAY"
+    quantity: int
+    transactionType: Literal["BUY", "SELL"] | None = None
+
+
+class DhanLiveManualEntryRequest(BaseModel):
+    transactionType: Literal["BUY", "SELL"] = "BUY"
+    optionType: Literal["PE", "CE"] = "PE"
+    strike: float
+    quantity: int
+    expiry: str | None = None
+    productType: str = "INTRADAY"
+
+
+class DhanInstrumentMasterCacheRequest(BaseModel):
+    force: bool = False
+
+
 class BacktestApiRequest(BaseModel):
-    instrument: Literal["NIFTY", "SENSEX"] = "NIFTY"
+    instrument: Literal["NIFTY", "BANKNIFTY", "SENSEX"] = "NIFTY"
     signalMode: Literal["both", "st_10_1"] = "both"
     startDate: str
     endDate: str
@@ -121,34 +192,10 @@ class BacktestApiRequest(BaseModel):
 
 class BacktestExportRequest(BaseModel):
     result: dict[str, Any]
-    reportType: str = "trades"
-
-
-class OptionContractBacktestApiRequest(BaseModel):
-    exchange: str = "NFO"
-    optionSymbol: str
-    optionSymbol2: str = ""
-    interval: Literal["1m", "5m"] = "1m"
-    signalMode: Literal["both", "st_10_1"] = "both"
-    entrySignal: Literal["BUY", "SELL", "BOTH"] = "BUY"
-    startDate: str
-    endDate: str
-    balance: float
-    lotSize: int = 75
-    targetPct: float
-    maxSignalCandlePct: float = 10
-    stopLossPct: float
-    strikeOffset: int = 0
-    stopLossMode: Literal["signal_low", "percent"] = "signal_low"
-    capStopLoss: bool = True
-    requireVwap: bool = False
-    entryTiming: Literal["signal_close", "next_minute"] = "next_minute"
-    entryTime: str
-    exitTime: str
 
 
 class FiveMinuteOptionBacktestApiRequest(BaseModel):
-    instrument: Literal["NIFTY", "SENSEX"] = "NIFTY"
+    instrument: Literal["NIFTY", "BANKNIFTY", "SENSEX"] = "NIFTY"
     mode: Literal["fixed", "dynamic"] = "fixed"
     contract1: str = ""
     contract2: str = ""
@@ -161,8 +208,15 @@ class FiveMinuteOptionBacktestApiRequest(BaseModel):
     minBodyPct: float = 0
     stopLossPct: float = 0
     strikeOffset: int | str = 0
+    expiryOffset: int = 0
     entryTime: str
     exitTime: str
+    requireVwap: bool = False
+    minVolumeMultiplier: float = 0
+    volumeLookback: int = 20
+    maxEntryGapPct: float = 0
+    trailingStopPct: float = 0
+    maxTradesPerDay: int = 0
 
 
 @app.get("/healthz")
@@ -367,58 +421,6 @@ def _write_backtest_csv(result: dict[str, Any], timezone) -> Path:
     return path
 
 
-def _write_option_backtest_report_csv(result: dict[str, Any], timezone) -> Path:
-    trades = result.get("trades") or []
-    if not isinstance(trades, list):
-        trades = []
-
-    data = result.get("data") if isinstance(result.get("data"), dict) else {}
-    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-    request = result.get("request") if isinstance(result.get("request"), dict) else {}
-    generated_at = datetime.now(timezone)
-    export_dir = Path("exports/backtests")
-    export_dir.mkdir(parents=True, exist_ok=True)
-    symbol = str(data.get("symbol") or "OPTION").replace(" ", "_").replace("/", "-")
-    path = export_dir / f"{generated_at.strftime('%Y%m%d_%H%M%S')}_{symbol}_option_report.csv"
-
-    option_rows = {
-        "CE": {"trades": 0, "pnl": 0.0},
-        "PE": {"trades": 0, "pnl": 0.0},
-    }
-    for trade in trades:
-        if not isinstance(trade, dict):
-            continue
-        option_type = str(trade.get("optionType") or "").upper()
-        if option_type not in option_rows:
-            continue
-        option_rows[option_type]["trades"] += 1
-        option_rows[option_type]["pnl"] += float(trade.get("netPnl") or 0.0)
-
-    row = {
-        "exportedAt": generated_at.isoformat(),
-        "startDate": request.get("start_date"),
-        "endDate": request.get("end_date"),
-        "contracts": " / ".join(data.get("contracts") or []),
-        "exchange": request.get("exchange"),
-        "interval": data.get("signalInterval") or data.get("interval"),
-        "signalMode": data.get("signalMode"),
-        "entrySignal": request.get("entry_signal"),
-        "totalTrades": summary.get("tradeCount"),
-        "totalPnl": summary.get("netPnl"),
-        "ceTrades": option_rows["CE"]["trades"],
-        "peTrades": option_rows["PE"]["trades"],
-        "cePnl": round(option_rows["CE"]["pnl"], 2),
-        "pePnl": round(option_rows["PE"]["pnl"], 2),
-    }
-
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
-        writer.writeheader()
-        writer.writerow(row)
-
-    return path
-
-
 def _trade_matches_strategy_key(trade: dict, strategy_key: str | None) -> bool:
     if not strategy_key:
         return True
@@ -430,7 +432,13 @@ def _trade_matches_strategy_key(trade: dict, strategy_key: str | None) -> bool:
     return False
 
 
-def _build_paper_dashboard_payload(settings, paper_state: dict, strategy_key: str | None = None) -> dict:
+def _build_paper_dashboard_payload(
+    settings,
+    paper_state: dict,
+    strategy_key: str | None = None,
+    *,
+    trade_history: list[dict] | None = None,
+) -> dict:
     now = datetime.now(settings.timezone)
     active_trade = paper_state.get("active_trade")
     raw_active_trades = paper_state.get("active_trades")
@@ -439,46 +447,74 @@ def _build_paper_dashboard_payload(settings, paper_state: dict, strategy_key: st
     else:
         active_trades = [active_trade] if active_trade else []
     active_trade_unrealized_pnl = 0.0
-    price_provider = OptionPriceProvider(settings)
-
-    try:
+    if active_trades:
+        price_provider = OptionPriceProvider(settings)
         enriched_active_trades = []
-        for trade in active_trades:
-            enriched_trade = _with_computed_target(settings, trade)
-            try:
-                live_option_price, live_price_source = price_provider.quote_trade(enriched_trade, prefer_stream=False)
-                short_trade = str(enriched_trade.get("signal") or "").upper() == "SELL"
-                unrealized_pnl = round(
-                    (
-                        (float(enriched_trade["entry_price"]) - live_option_price)
-                        if short_trade
-                        else (live_option_price - float(enriched_trade["entry_price"]))
-                    )
-                    * int(enriched_trade["quantity"]),
-                    2,
+        try:
+            for trade in active_trades:
+                enriched_trade = _with_computed_target(settings, trade)
+                trade_cache_key = str(
+                    enriched_trade.get("trade_id")
+                    or enriched_trade.get("tradeId")
+                    or enriched_trade.get("option_symbol")
+                    or enriched_trade.get("optionSymbol")
+                    or id(enriched_trade)
                 )
-                enriched_trade = {
-                    **enriched_trade,
-                    "livePrice": round(live_option_price, 2),
-                    "unrealizedPnl": unrealized_pnl,
-                    "livePriceSource": live_price_source,
-                }
-            except Exception:
-                unrealized_pnl = 0.0
-                enriched_trade = {
-                    **enriched_trade,
-                    "livePrice": None,
-                    "unrealizedPnl": None,
-                    "livePriceSource": None,
-                }
-            active_trade_unrealized_pnl += unrealized_pnl
-            enriched_active_trades.append(enriched_trade)
-        active_trades = enriched_active_trades
-        active_trade = active_trades[0] if active_trades else None
-    finally:
-        price_provider.close()
+                cached_quote = _ACTIVE_TRADE_QUOTE_CACHE.get(trade_cache_key)
+                live_option_price = None
+                live_price_source = None
+                if (
+                    cached_quote
+                    and cached_quote.get("expires_at")
+                    and cached_quote["expires_at"] > now
+                ):
+                    live_option_price = cached_quote.get("price")
+                    live_price_source = cached_quote.get("source")
 
-    trade_history = _load_paper_trade_history(settings, strategy_key=strategy_key)
+                try:
+                    if live_option_price is None:
+                        live_option_price, live_price_source = price_provider.quote_trade(
+                            enriched_trade,
+                            prefer_stream=False,
+                        )
+                        _ACTIVE_TRADE_QUOTE_CACHE[trade_cache_key] = {
+                            "expires_at": now + timedelta(seconds=_ACTIVE_TRADE_QUOTE_CACHE_TTL_SECONDS),
+                            "price": live_option_price,
+                            "source": live_price_source,
+                        }
+                    short_trade = str(enriched_trade.get("signal") or "").upper() == "SELL"
+                    unrealized_pnl = round(
+                        (
+                            (float(enriched_trade["entry_price"]) - float(live_option_price))
+                            if short_trade
+                            else (float(live_option_price) - float(enriched_trade["entry_price"]))
+                        )
+                        * int(enriched_trade["quantity"]),
+                        2,
+                    )
+                    enriched_trade = {
+                        **enriched_trade,
+                        "livePrice": round(float(live_option_price), 2),
+                        "unrealizedPnl": unrealized_pnl,
+                        "livePriceSource": live_price_source,
+                    }
+                except Exception:
+                    unrealized_pnl = 0.0
+                    enriched_trade = {
+                        **enriched_trade,
+                        "livePrice": None,
+                        "unrealizedPnl": None,
+                        "livePriceSource": None,
+                    }
+                active_trade_unrealized_pnl += unrealized_pnl
+                enriched_active_trades.append(enriched_trade)
+            active_trades = enriched_active_trades
+            active_trade = active_trades[0] if active_trades else None
+        finally:
+            price_provider.close()
+
+    if trade_history is None:
+        trade_history = _load_paper_trade_history(settings, strategy_key=strategy_key)
     summary_by_range = _build_paper_summary_by_range(
         settings,
         paper_state,
@@ -729,17 +765,39 @@ def _filtered_recent_alerts(alerts: list[dict]) -> list[dict]:
 
 
 def _load_market_quotes(settings) -> list[dict]:
+    now = datetime.now(settings.timezone)
+    if (
+        _MARKET_QUOTES_CACHE.get("expires_at")
+        and _MARKET_QUOTES_CACHE["expires_at"] > now
+        and isinstance(_MARKET_QUOTES_CACHE.get("payload"), list)
+    ):
+        return _MARKET_QUOTES_CACHE["payload"]
+
     price_provider = OptionPriceProvider(settings)
     try:
-        return price_provider.index_quotes()
+        payload = price_provider.index_quotes()
+        _MARKET_QUOTES_CACHE["expires_at"] = now + timedelta(seconds=_MARKET_QUOTES_CACHE_TTL_SECONDS)
+        _MARKET_QUOTES_CACHE["payload"] = payload
+        return payload
     finally:
         price_provider.close()
 
 
 def _load_zerodha_health(settings) -> dict:
+    now = datetime.now(settings.timezone)
+    if (
+        _ZERODHA_HEALTH_CACHE.get("expires_at")
+        and _ZERODHA_HEALTH_CACHE["expires_at"] > now
+        and isinstance(_ZERODHA_HEALTH_CACHE.get("payload"), dict)
+    ):
+        return _ZERODHA_HEALTH_CACHE["payload"]
+
     price_provider = OptionPriceProvider(settings)
     try:
-        return price_provider.health_check()
+        payload = price_provider.health_check()
+        _ZERODHA_HEALTH_CACHE["expires_at"] = now + timedelta(seconds=_ZERODHA_HEALTH_CACHE_TTL_SECONDS)
+        _ZERODHA_HEALTH_CACHE["payload"] = payload
+        return payload
     finally:
         price_provider.close()
 
@@ -776,7 +834,12 @@ def _clear_live_trading_cache() -> None:
     _LIVE_TRADING_SNAPSHOT_CACHE["payload"] = None
 
 
-def _load_live_trading_payload(settings, *, force_refresh: bool = False) -> dict:
+def _clear_dhan_live_trading_cache() -> None:
+    _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["expires_at"] = None
+    _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["payload"] = None
+
+
+def _load_live_trading_payload(settings, *, force_refresh: bool = False, lightweight: bool = False) -> dict:
     state_store = build_state_store(settings)
     broker = LiveTradingBroker(settings, state_store)
     try:
@@ -790,6 +853,8 @@ def _load_live_trading_payload(settings, *, force_refresh: bool = False) -> dict
             "balance": {},
             "error": None,
         }
+        if lightweight:
+            return payload
         if status["zerodhaReady"]:
             now = datetime.now(settings.timezone)
             cached_until = _LIVE_TRADING_SNAPSHOT_CACHE.get("expires_at")
@@ -825,10 +890,317 @@ def _load_live_trading_payload(settings, *, force_refresh: bool = False) -> dict
         state_store.close()
 
 
+def _load_dhan_live_trading_payload(
+    settings,
+    *,
+    force_refresh: bool = False,
+    lightweight: bool = False,
+    positions_only: bool = False,
+) -> dict:
+    state_store = build_state_store(settings)
+    broker = DhanLiveTradingBroker(settings, state_store)
+    try:
+        status = broker.status()
+        payload = {
+            "status": status,
+            "orders": [],
+            "trades": [],
+            "positions": [],
+            "funds": {},
+            "balance": {},
+            "instrumentMaster": broker.instrument_master_cache_status(),
+            "error": None,
+        }
+        if lightweight:
+            return payload
+        if status["dhanReady"]:
+            if positions_only:
+                try:
+                    positions = broker.positions()
+                    payload["positions"] = positions
+                    payload["activePositions"] = _enrich_dhan_active_positions(
+                        broker,
+                        positions,
+                    )
+                except Exception as exc:
+                    payload["error"] = str(exc)
+                return payload
+
+            now = datetime.now(settings.timezone)
+            cached_until = _DHAN_LIVE_TRADING_SNAPSHOT_CACHE.get("expires_at")
+            cached_payload = _DHAN_LIVE_TRADING_SNAPSHOT_CACHE.get("payload")
+            if (
+                not force_refresh
+                and cached_until is not None
+                and cached_until > now
+                and isinstance(cached_payload, dict)
+            ):
+                cached_payload = dict(cached_payload)
+                cached_payload["status"] = status
+                return cached_payload
+            try:
+                positions = broker.positions()
+                payload.update(
+                    {
+                        "orders": broker.orderbook(),
+                        "trades": broker.trades(),
+                        "positions": positions,
+                        "funds": broker.fundlimit(),
+                    }
+                )
+                payload["balance"] = broker.balance_summary()
+                payload["activePositions"] = _enrich_dhan_active_positions(
+                    broker,
+                    positions,
+                )
+                _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["expires_at"] = now + timedelta(
+                    seconds=_LIVE_TRADING_SNAPSHOT_TTL_SECONDS
+                )
+                _DHAN_LIVE_TRADING_SNAPSHOT_CACHE["payload"] = dict(payload)
+            except Exception as exc:
+                payload["error"] = str(exc)
+        return payload
+    finally:
+        broker.close()
+        state_store.close()
+
+
+def _first_float(payload: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        if value in {None, ""}:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _dhan_position_security_id(position: dict[str, Any]) -> str | None:
+    for key in ("securityId", "security_id", "drvSecurityId", "instrumentToken"):
+        value = position.get(key)
+        if value not in {None, ""}:
+            return str(value)
+    return None
+
+
+def _dhan_position_average_price(position: dict[str, Any], quantity: int) -> float | None:
+    if quantity < 0:
+        return _first_float(
+            position,
+            "sellAvg",
+            "sellAvgPrice",
+            "averagePrice",
+            "costPrice",
+            "avgPrice",
+        )
+    return _first_float(
+        position,
+        "buyAvg",
+        "buyAvgPrice",
+        "averagePrice",
+        "costPrice",
+        "avgPrice",
+    )
+
+
+def _dhan_position_ltp(position: dict[str, Any]) -> float | None:
+    return _first_float(
+        position,
+        "lastTradedPrice",
+        "lastPrice",
+        "ltp",
+        "LTP",
+        "marketPrice",
+    )
+
+
+def _dhan_position_pnl(position: dict[str, Any]) -> float | None:
+    return _first_float(
+        position,
+        "unrealizedProfit",
+        "unrealisedProfit",
+        "unrealizedPnl",
+        "unrealisedPnl",
+        "pnl",
+        "netPnl",
+        "realizedProfit",
+        "realisedProfit",
+    )
+
+
+def _enrich_dhan_active_positions(
+    broker: DhanLiveTradingBroker,
+    positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    active_positions = [
+        position for position in positions if dhan_position_quantity(position) != 0
+    ]
+    security_ids_by_segment: dict[str, list[str]] = {}
+    for position in active_positions:
+        security_id = _dhan_position_security_id(position)
+        if not security_id:
+            continue
+        segment = str(position.get("exchangeSegment") or "NSE_FNO").upper()
+        security_ids_by_segment.setdefault(segment, []).append(security_id)
+
+    quotes: dict[tuple[str, str], dict[str, Any]] = {}
+    for segment, security_ids in security_ids_by_segment.items():
+        try:
+            segment_quotes = broker.ltp_by_security_ids(
+                exchange_segment=segment,
+                security_ids=list(dict.fromkeys(security_ids)),
+            )
+        except Exception:
+            segment_quotes = {}
+        for security_id, quote in segment_quotes.items():
+            quotes[(segment, str(security_id))] = quote
+
+    enriched_positions: list[dict[str, Any]] = []
+    for position in active_positions:
+        quantity = dhan_position_quantity(position)
+        security_id = _dhan_position_security_id(position)
+        segment = str(position.get("exchangeSegment") or "NSE_FNO").upper()
+        quote = quotes.get((segment, str(security_id))) if security_id else None
+        ltp = _dhan_position_ltp(position)
+        quote_ltp = _first_float(quote or {}, "ltp")
+        if ltp is None:
+            ltp = quote_ltp
+        average_price = _dhan_position_average_price(position, quantity)
+        pnl = _dhan_position_pnl(position)
+        if pnl is None and ltp is not None and average_price is not None:
+            if quantity >= 0:
+                pnl = (ltp - average_price) * quantity
+            else:
+                pnl = (average_price - ltp) * abs(quantity)
+
+        enriched_positions.append(
+            {
+                **position,
+                "securityId": security_id,
+                "exchangeSegment": segment,
+                "netQuantity": quantity,
+                "averagePrice": round(average_price, 2) if average_price is not None else None,
+                "ltp": round(ltp, 2) if ltp is not None else None,
+                "lastTradedPrice": round(ltp, 2) if ltp is not None else None,
+                "pnl": round(pnl, 2) if pnl is not None else None,
+                "unrealizedProfit": round(pnl, 2) if pnl is not None else None,
+                "quoteSource": "dhan_marketfeed_ltp" if quote_ltp is not None else "positions",
+            }
+        )
+    return enriched_positions
+
+
+def _dhan_ltp_quote_from_packet(packet: bytes) -> dict[str, Any] | None:
+    if len(packet) < 12:
+        return None
+    response_code = packet[0]
+    if response_code not in {2, 4, 8}:
+        return None
+    try:
+        security_id = struct.unpack_from("<i", packet, 4)[0]
+        ltp = struct.unpack_from("<f", packet, 8)[0]
+    except struct.error:
+        return None
+    return {
+        "securityId": str(security_id),
+        "ltp": round(float(ltp), 2),
+        "responseCode": response_code,
+        "source": "dhan_websocket",
+        "receivedAt": datetime.now(get_settings().timezone).isoformat(),
+    }
+
+
+async def _stream_dhan_ltp_quotes(
+    request: Request,
+    positions: list[dict[str, Any]],
+) -> Any:
+    settings = get_settings()
+    active_positions = [
+        position for position in positions if dhan_position_quantity(position) != 0
+    ]
+    instruments = []
+    position_lookup: dict[str, dict[str, Any]] = {}
+    for position in active_positions:
+        security_id = _dhan_position_security_id(position)
+        if not security_id:
+            continue
+        segment = str(position.get("exchangeSegment") or "NSE_FNO").upper()
+        instruments.append(
+            {
+                "ExchangeSegment": segment,
+                "SecurityId": security_id,
+            }
+        )
+        position_lookup[security_id] = {
+            "securityId": security_id,
+            "tradingSymbol": position.get("tradingSymbol")
+            or position.get("tradingsymbol")
+            or position.get("symbol"),
+            "quantity": dhan_position_quantity(position),
+            "averagePrice": _dhan_position_average_price(
+                position,
+                dhan_position_quantity(position),
+            ),
+        }
+
+    if not instruments:
+        return
+    if websockets is None:
+        raise RuntimeError("websockets package is not installed.")
+
+    query = urlencode(
+        {
+            "version": "2",
+            "token": settings.dhan_access_token,
+            "clientId": settings.dhan_client_id,
+            "authType": "2",
+        }
+    )
+    url = f"wss://api-feed.dhan.co?{query}"
+    subscribe_payload = {
+        "RequestCode": 15,
+        "InstrumentCount": len(instruments),
+        "InstrumentList": instruments[:100],
+    }
+
+    async with websockets.connect(url, ping_interval=None) as websocket:
+        await websocket.send(json.dumps(subscribe_payload))
+        while not await request.is_disconnected():
+            try:
+                packet = await asyncio.wait_for(websocket.recv(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if not isinstance(packet, (bytes, bytearray)):
+                continue
+            quote = _dhan_ltp_quote_from_packet(bytes(packet))
+            if quote is None:
+                continue
+            position = position_lookup.get(str(quote["securityId"]))
+            if position:
+                average_price = _first_float(position, "averagePrice")
+                quantity = int(position.get("quantity") or 0)
+                if average_price is not None:
+                    if quantity >= 0:
+                        quote["pnl"] = round((quote["ltp"] - average_price) * quantity, 2)
+                    else:
+                        quote["pnl"] = round((average_price - quote["ltp"]) * abs(quantity), 2)
+                quote["tradingSymbol"] = position.get("tradingSymbol")
+            yield f"data: {json.dumps({'type': 'ltp', 'quote': quote})}\n\n"
+
+
 def _live_broker() -> tuple[LiveTradingBroker, Any]:
     settings = get_settings()
     state_store = build_state_store(settings)
     return LiveTradingBroker(settings, state_store), state_store
+
+
+def _dhan_live_broker() -> tuple[DhanLiveTradingBroker, Any]:
+    settings = get_settings()
+    state_store = build_state_store(settings)
+    return DhanLiveTradingBroker(settings, state_store), state_store
 
 
 def _raise_live_error(exc: Exception) -> None:
@@ -904,6 +1276,7 @@ def _strategy_setup_payload(
     schedule_end: str,
     target_pct: float,
     include_env_contracts: bool,
+    include_next_expiry: bool = True,
 ) -> dict:
     daily_setup = daily_setup or {}
     payload = {
@@ -923,11 +1296,41 @@ def _strategy_setup_payload(
         "strikeOffset": daily_setup.get("strike_offset")
         if daily_setup.get("strike_offset") is not None
         else settings.option_contract_strike_offset,
+        "expiryOffset": daily_setup.get("expiry_offset")
+        if daily_setup.get("expiry_offset") is not None
+        else settings.option_contract_expiry_offset,
         "stopLossMode": daily_setup.get("stop_loss_mode") or settings.option_contract_stop_loss_mode,
         "stopLossPct": daily_setup.get("stop_loss_pct") or settings.option_contract_stop_loss_pct,
+        "requireVwap": daily_setup.get("require_vwap")
+        if daily_setup.get("require_vwap") is not None
+        else settings.option_contract_require_vwap,
+        "minVolumeMultiplier": daily_setup.get("min_volume_multiplier")
+        if daily_setup.get("min_volume_multiplier") is not None
+        else settings.option_contract_min_volume_multiplier,
+        "volumeLookback": daily_setup.get("volume_lookback")
+        if daily_setup.get("volume_lookback") is not None
+        else settings.option_contract_volume_lookback,
+        "maxEntryGapPct": daily_setup.get("max_entry_gap_pct")
+        if daily_setup.get("max_entry_gap_pct") is not None
+        else settings.option_contract_max_entry_gap_pct,
+        "trailingStopPct": daily_setup.get("trailing_stop_pct")
+        if daily_setup.get("trailing_stop_pct") is not None
+        else settings.option_contract_trailing_stop_pct,
+        "maxTradesPerDay": daily_setup.get("max_trades_per_day")
+        if daily_setup.get("max_trades_per_day") is not None
+        else settings.option_contract_max_trades_per_day,
         "startingBalance": daily_setup.get("starting_balance") or settings.paper_trade_capital,
         "dailyContracts": daily_setup or None,
-        "nextExpiry": _load_next_option_expiry(settings),
+        "nextExpiry": (
+            _load_next_option_expiry(
+                settings,
+                daily_setup.get("expiry_offset")
+                if daily_setup.get("expiry_offset") is not None
+                else settings.option_contract_expiry_offset,
+            )
+            if include_next_expiry
+            else None
+        ),
         "effectiveContracts": {
             "contract1": daily_setup.get("contract_1") or "",
             "contract2": daily_setup.get("contract_2") or "",
@@ -946,6 +1349,12 @@ def _strategy_setup_payload(
     return payload
 
 
+def _daily_setup_has_contracts(daily_setup: dict | None) -> bool:
+    if not daily_setup:
+        return False
+    return bool(str(daily_setup.get("contract_1") or "").strip() or str(daily_setup.get("contract_2") or "").strip())
+
+
 def _parse_option_expiry(value: Any):
     if value is None:
         return None
@@ -957,8 +1366,9 @@ def _parse_option_expiry(value: Any):
         return None
 
 
-def _load_next_option_expiry(settings) -> dict | None:
-    cache_key = f"{settings.zerodha_option_exchange}:{settings.zerodha_underlying}".upper()
+def _load_next_option_expiry(settings, expiry_offset: int = 0) -> dict | None:
+    expiry_index = max(0, int(expiry_offset or 0))
+    cache_key = f"{settings.zerodha_option_exchange}:{settings.zerodha_underlying}:{expiry_index}".upper()
     now = datetime.now(settings.timezone)
     cached_items = _OPTION_EXPIRY_CACHE.get("items") or {}
     if (
@@ -989,10 +1399,14 @@ def _load_next_option_expiry(settings) -> dict | None:
     if not expiries:
         payload = None
     else:
-        next_expiry = min(expiries)
+        unique_expiries = sorted(set(expiries))
+        if expiry_index >= len(unique_expiries):
+            return None
+        next_expiry = unique_expiries[expiry_index]
         payload = {
             "date": next_expiry.isoformat(),
             "label": next_expiry.strftime("%d %b %Y"),
+            "offset": expiry_index,
         }
 
     cached_items[cache_key] = payload
@@ -1001,19 +1415,21 @@ def _load_next_option_expiry(settings) -> dict | None:
     return payload
 
 
-def _load_dashboard_payload() -> dict:
+def _load_dashboard_payload(*, lightweight: bool = False) -> dict:
     settings = get_settings()
     nifty_settings = option_strategy_settings_for_key(settings, OPTION_CONTRACT_STRATEGY_KEY)
     sensex_settings = option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
     nifty_five_minute_settings = option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
-    sensex_five_minute_settings = option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY)
+    nifty_five_minute_v2_settings = option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY)
+    dhan_nifty_live_settings = option_strategy_settings_for_key(settings, DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY)
     state_store = build_state_store(settings)
     try:
         state = state_store.load_state()
         paper_state = state_store.load_paper_trading(OPTION_CONTRACT_STRATEGY_KEY)
         sensex_paper_state = state_store.load_paper_trading(SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
         nifty_five_minute_paper_state = state_store.load_paper_trading(NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
-        sensex_five_minute_paper_state = state_store.load_paper_trading(SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY)
+        nifty_five_minute_v2_paper_state = state_store.load_paper_trading(NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY)
+        dhan_nifty_live_paper_state = state_store.load_paper_trading(DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY)
         trade_date = datetime.now(settings.timezone).date().isoformat()
         nifty_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
@@ -1027,13 +1443,18 @@ def _load_dashboard_payload() -> dict:
             trade_date,
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
         )
-        sensex_five_minute_daily_contracts = state_store.load_daily_option_contracts(
+        nifty_five_minute_v2_daily_contracts = state_store.load_daily_option_contracts(
             trade_date,
-            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
+        )
+        dhan_nifty_live_daily_contracts = state_store.load_daily_option_contracts(
+            trade_date,
+            DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
         )
         recent_alerts = _filtered_recent_alerts(state_store.list_recent_alerts())
     finally:
         state_store.close()
+    all_trade_history = [] if lightweight else _load_paper_trade_history(settings)
     now = datetime.now(settings.timezone)
     trade_date = now.date().isoformat()
     daily_contracts = nifty_five_minute_daily_contracts or nifty_daily_contracts
@@ -1046,13 +1467,16 @@ def _load_dashboard_payload() -> dict:
             nifty_five_minute_daily_contracts,
         ),
         (
-            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
-            sensex_five_minute_settings,
-            sensex_five_minute_daily_contracts,
+            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
+            nifty_five_minute_v2_settings,
+            nifty_five_minute_v2_daily_contracts,
         ),
     ]
+    configured_active_schedules = [
+        schedule for schedule in active_schedules if _daily_setup_has_contracts(schedule[2])
+    ]
     active_next_runs = []
-    for strategy_key, strategy_settings, strategy_daily_setup in active_schedules:
+    for strategy_key, strategy_settings, strategy_daily_setup in configured_active_schedules or active_schedules:
         schedule_start = (strategy_daily_setup or {}).get("schedule_start") or strategy_settings.schedule_start
         schedule_end = (strategy_daily_setup or {}).get("schedule_end") or strategy_settings.schedule_end
         active_next_runs.append(
@@ -1074,6 +1498,52 @@ def _load_dashboard_payload() -> dict:
     next_run, next_run_strategy_key, next_run_settings, option_schedule_start, option_schedule_end = min(
         active_next_runs,
         key=lambda item: item[0],
+    )
+
+    nifty_paper_payload = _build_paper_dashboard_payload(
+        nifty_settings,
+        paper_state,
+        OPTION_CONTRACT_STRATEGY_KEY,
+        trade_history=[
+            trade for trade in all_trade_history
+            if _trade_matches_strategy_key(trade, OPTION_CONTRACT_STRATEGY_KEY)
+        ],
+    )
+    sensex_paper_payload = _build_paper_dashboard_payload(
+        sensex_settings,
+        sensex_paper_state,
+        SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
+        trade_history=[
+            trade for trade in all_trade_history
+            if _trade_matches_strategy_key(trade, SENSEX_OPTION_CONTRACT_STRATEGY_KEY)
+        ],
+    )
+    nifty_five_minute_payload = _build_paper_dashboard_payload(
+        nifty_five_minute_settings,
+        nifty_five_minute_paper_state,
+        NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        trade_history=[
+            trade for trade in all_trade_history
+            if _trade_matches_strategy_key(trade, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY)
+        ],
+    )
+    nifty_five_minute_v2_payload = _build_paper_dashboard_payload(
+        nifty_five_minute_v2_settings,
+        nifty_five_minute_v2_paper_state,
+        NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
+        trade_history=[
+            trade for trade in all_trade_history
+            if _trade_matches_strategy_key(trade, NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY)
+        ],
+    )
+    dhan_nifty_live_payload = _build_paper_dashboard_payload(
+        dhan_nifty_live_settings,
+        dhan_nifty_live_paper_state,
+        DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
+        trade_history=[
+            trade for trade in all_trade_history
+            if _trade_matches_strategy_key(trade, DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY)
+        ],
     )
 
     return {
@@ -1123,6 +1593,7 @@ def _load_dashboard_payload() -> dict:
                     schedule_end=nifty_one_minute_schedule_end,
                     target_pct=nifty_settings.option_contract_target_pct,
                     include_env_contracts=True,
+                    include_next_expiry=not lightweight,
                 ),
                 SENSEX_OPTION_CONTRACT_STRATEGY_KEY: _strategy_setup_payload(
                     strategy_key=SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
@@ -1134,10 +1605,11 @@ def _load_dashboard_payload() -> dict:
                     schedule_end=(sensex_daily_contracts or {}).get("schedule_end") or sensex_settings.schedule_end,
                     target_pct=sensex_settings.option_contract_target_pct,
                     include_env_contracts=True,
+                    include_next_expiry=not lightweight,
                 ),
                 NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: _strategy_setup_payload(
                     strategy_key=NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-                    label="NIFTY 5m option bot",
+                    label="NIFTY 5m option bot V1",
                     trade_date=trade_date,
                     daily_setup=nifty_five_minute_daily_contracts,
                     settings=nifty_five_minute_settings,
@@ -1145,17 +1617,31 @@ def _load_dashboard_payload() -> dict:
                     schedule_end=(nifty_five_minute_daily_contracts or {}).get("schedule_end") or nifty_five_minute_settings.schedule_end,
                     target_pct=nifty_five_minute_settings.option_contract_target_pct,
                     include_env_contracts=True,
+                    include_next_expiry=not lightweight,
                 ),
-                SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY: _strategy_setup_payload(
-                    strategy_key=SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
-                    label="SENSEX 5m option bot",
+                NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY: _strategy_setup_payload(
+                    strategy_key=NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
+                    label="NIFTY 5m option bot V2",
                     trade_date=trade_date,
-                    daily_setup=sensex_five_minute_daily_contracts,
-                    settings=sensex_five_minute_settings,
-                    schedule_start=(sensex_five_minute_daily_contracts or {}).get("schedule_start") or sensex_five_minute_settings.schedule_start,
-                    schedule_end=(sensex_five_minute_daily_contracts or {}).get("schedule_end") or sensex_five_minute_settings.schedule_end,
-                    target_pct=sensex_five_minute_settings.option_contract_target_pct,
+                    daily_setup=nifty_five_minute_v2_daily_contracts,
+                    settings=nifty_five_minute_v2_settings,
+                    schedule_start=(nifty_five_minute_v2_daily_contracts or {}).get("schedule_start") or nifty_five_minute_v2_settings.schedule_start,
+                    schedule_end=(nifty_five_minute_v2_daily_contracts or {}).get("schedule_end") or nifty_five_minute_v2_settings.schedule_end,
+                    target_pct=nifty_five_minute_v2_settings.option_contract_target_pct,
                     include_env_contracts=True,
+                    include_next_expiry=not lightweight,
+                ),
+                DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY: _strategy_setup_payload(
+                    strategy_key=DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
+                    label="Dhan NIFTY 5m live",
+                    trade_date=trade_date,
+                    daily_setup=dhan_nifty_live_daily_contracts,
+                    settings=dhan_nifty_live_settings,
+                    schedule_start=(dhan_nifty_live_daily_contracts or {}).get("schedule_start") or dhan_nifty_live_settings.schedule_start,
+                    schedule_end=(dhan_nifty_live_daily_contracts or {}).get("schedule_end") or dhan_nifty_live_settings.schedule_end,
+                    target_pct=dhan_nifty_live_settings.option_contract_target_pct,
+                    include_env_contracts=False,
+                    include_next_expiry=not lightweight,
                 ),
             },
         },
@@ -1176,34 +1662,36 @@ def _load_dashboard_payload() -> dict:
             "loginUrl": _kite_login_url(settings.zerodha_api_key, settings.zerodha_redirect_url)
             if settings.zerodha_api_key
             else None,
-            "health": _load_zerodha_health(settings),
+            "health": (
+                _ZERODHA_HEALTH_CACHE.get("payload")
+                if lightweight and isinstance(_ZERODHA_HEALTH_CACHE.get("payload"), dict)
+                else None
+                if lightweight
+                else _load_zerodha_health(settings)
+            ),
         },
-        "liveTrading": _load_live_trading_payload(settings),
-        "marketQuotes": _load_market_quotes(settings),
+        "liveTrading": _load_live_trading_payload(settings, lightweight=True),
+        "dhan": {
+            "clientIdConfigured": bool(settings.dhan_client_id),
+            "accessTokenConfigured": bool(settings.dhan_access_token),
+        },
+        "dhanLiveTrading": _load_dhan_live_trading_payload(settings, lightweight=True),
+        "marketQuotes": (
+            _MARKET_QUOTES_CACHE.get("payload")
+            if lightweight and isinstance(_MARKET_QUOTES_CACHE.get("payload"), list)
+            else []
+            if lightweight
+            else _load_market_quotes(settings)
+        ),
         "latestAlert": recent_alerts[0] if recent_alerts else None,
         "recentAlerts": recent_alerts,
-        "paperTrading": _build_paper_dashboard_payload(nifty_settings, paper_state, OPTION_CONTRACT_STRATEGY_KEY),
+        "paperTrading": nifty_paper_payload,
         "paperTradingByStrategy": {
-            OPTION_CONTRACT_STRATEGY_KEY: _build_paper_dashboard_payload(
-                nifty_settings,
-                paper_state,
-                OPTION_CONTRACT_STRATEGY_KEY,
-            ),
-            SENSEX_OPTION_CONTRACT_STRATEGY_KEY: _build_paper_dashboard_payload(
-                sensex_settings,
-                sensex_paper_state,
-                SENSEX_OPTION_CONTRACT_STRATEGY_KEY,
-            ),
-            NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: _build_paper_dashboard_payload(
-                nifty_five_minute_settings,
-                nifty_five_minute_paper_state,
-                NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-            ),
-            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY: _build_paper_dashboard_payload(
-                sensex_five_minute_settings,
-                sensex_five_minute_paper_state,
-                SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
-            ),
+            OPTION_CONTRACT_STRATEGY_KEY: nifty_paper_payload,
+            SENSEX_OPTION_CONTRACT_STRATEGY_KEY: sensex_paper_payload,
+            NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: nifty_five_minute_payload,
+            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY: nifty_five_minute_v2_payload,
+            DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY: dhan_nifty_live_payload,
         },
     }
 
@@ -1232,16 +1720,150 @@ def _load_logs_payload(date: str) -> dict:
             logs = store.load_logs(date)
             source = "structured" if logs else "none"
 
+    dhan_live_cached_candle = _load_dhan_live_cached_candle(settings, date, logs)
+
     return {
         "date": date,
         "source": source,
         "logs": logs,
+        "dhanLiveCachedCandle": dhan_live_cached_candle,
+    }
+
+
+def _load_dhan_live_cached_candle(settings, date: str, logs: list[dict]) -> dict | None:
+    latest_dhan_log = next(
+        (
+            log
+            for log in logs
+            if isinstance(log, dict)
+            and str(log.get("strategy_key") or "").lower() == DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY
+        ),
+        None,
+    )
+    if latest_dhan_log is None:
+        return None
+
+    latest_contract = _latest_log_contract_detail(latest_dhan_log)
+    dhan_contract = _resolve_dhan_cached_contract(settings, latest_contract)
+
+    repository = ExactCandleRepository(
+        settings.mongodb_uri,
+        settings.mongodb_database,
+        settings.mongodb_option_candles_collection,
+    )
+    try:
+        row = repository.latest_candle(
+            underlying="NIFTY",
+            trade_date=date,
+            interval="minute",
+        )
+    finally:
+        repository.close()
+
+    if not row:
+        if not latest_contract:
+            return None
+        return {
+            "tradingsymbol": latest_contract.get("resolved_symbol") or latest_contract.get("input"),
+            "candleTime": latest_contract.get("candle_time") or latest_dhan_log.get("candle_time"),
+            "open": latest_contract.get("open"),
+            "high": latest_contract.get("high"),
+            "low": latest_contract.get("low"),
+            "close": latest_contract.get("close"),
+            "strike": latest_contract.get("strike"),
+            "optionType": _option_type_from_symbol(latest_contract.get("resolved_symbol") or latest_contract.get("input")),
+            "expiry": latest_contract.get("expiry"),
+            "strikeOffset": latest_contract.get("strike_offset"),
+            "source": "dhan_live_run_log",
+            "dhanCachedContract": dhan_contract,
+        }
+
+    return {
+        "tradingsymbol": row.get("tradingsymbol"),
+        "candleTime": row.get("candle_time"),
+        "open": row.get("open"),
+        "high": row.get("high"),
+        "low": row.get("low"),
+        "close": row.get("close"),
+        "strike": row.get("strike"),
+        "optionType": row.get("option_type"),
+        "expiry": row.get("expiry"),
+        "strikeOffset": row.get("strike_offset"),
+        "source": row.get("source"),
+        "updatedAt": row.get("updated_at"),
+        "dhanCachedContract": dhan_contract,
+    }
+
+
+def _latest_log_contract_detail(log: dict) -> dict | None:
+    contract_signals = log.get("contract_signals")
+    if isinstance(contract_signals, list):
+        for item in contract_signals:
+            if isinstance(item, dict) and (item.get("resolved_symbol") or item.get("close") is not None):
+                return item
+    if log.get("option_symbol") or log.get("close") is not None:
+        return {
+            "resolved_symbol": log.get("option_symbol"),
+            "open": log.get("open"),
+            "high": log.get("high"),
+            "low": log.get("low"),
+            "close": log.get("close"),
+            "strike": log.get("strike"),
+            "strike_offset": log.get("strike_offset"),
+            "expiry": log.get("expiry"),
+            "candle_time": log.get("candle_time"),
+        }
+    return None
+
+
+def _option_type_from_symbol(symbol: Any) -> str | None:
+    value = str(symbol or "").upper()
+    if value.endswith("CE"):
+        return "CE"
+    if value.endswith("PE"):
+        return "PE"
+    return None
+
+
+def _resolve_dhan_cached_contract(settings, contract_detail: dict | None) -> dict | None:
+    if not contract_detail:
+        return None
+    strike = contract_detail.get("strike")
+    option_type = _option_type_from_symbol(contract_detail.get("resolved_symbol") or contract_detail.get("input"))
+    expiry = contract_detail.get("expiry")
+    if strike is None or option_type is None:
+        return None
+
+    state_store = build_state_store(settings)
+    broker = DhanLiveTradingBroker(settings, state_store)
+    try:
+        if not broker.instrument_master_cache_status().get("cached"):
+            return None
+        security = broker.resolve_option_security(
+            underlying="NIFTY",
+            strike=strike,
+            option_type=option_type,
+            expiry=expiry,
+        )
+    except Exception:
+        return None
+    finally:
+        broker.close()
+        state_store.close()
+
+    if not security:
+        return None
+
+    return {
+        "securityId": security.get("securityId"),
+        "tradingSymbol": security.get("tradingSymbol"),
+        "exchangeSegment": security.get("exchangeSegment"),
     }
 
 
 @app.get("/api/dashboard")
-def dashboard_data() -> dict:
-    return _load_dashboard_payload()
+def dashboard_data(lightweight: bool = False) -> dict:
+    return _load_dashboard_payload(lightweight=lightweight)
 
 
 @app.get("/api/market-quotes")
@@ -1264,7 +1886,8 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
         raise HTTPException(status_code=400, detail="Contract 1 is required.")
     five_minute_strategy = payload.strategyKey in {
         NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-        SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
+        DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
     }
     contract_mode = payload.contractMode or "dynamic"
     if payload.strategyKey in {
@@ -1294,9 +1917,28 @@ def save_strategy_contracts(payload: StrategyContractsRequest) -> dict:
                 if payload.minSignalCandlePct is not None
                 else strategy_settings.option_contract_min_signal_candle_pct,
                 "strike_offset": payload.strikeOffset if payload.strikeOffset is not None else strategy_settings.option_contract_strike_offset,
+                "expiry_offset": payload.expiryOffset if payload.expiryOffset is not None else strategy_settings.option_contract_expiry_offset,
                 "entry_signal": payload.entrySignal or strategy_settings.option_contract_entry_signal,
                 "stop_loss_mode": payload.stopLossMode or strategy_settings.option_contract_stop_loss_mode,
                 "stop_loss_pct": payload.stopLossPct or strategy_settings.option_contract_stop_loss_pct,
+                "require_vwap": bool(payload.requireVwap)
+                if payload.requireVwap is not None
+                else strategy_settings.option_contract_require_vwap,
+                "min_volume_multiplier": payload.minVolumeMultiplier
+                if payload.minVolumeMultiplier is not None
+                else strategy_settings.option_contract_min_volume_multiplier,
+                "volume_lookback": payload.volumeLookback
+                if payload.volumeLookback is not None
+                else strategy_settings.option_contract_volume_lookback,
+                "max_entry_gap_pct": payload.maxEntryGapPct
+                if payload.maxEntryGapPct is not None
+                else strategy_settings.option_contract_max_entry_gap_pct,
+                "trailing_stop_pct": payload.trailingStopPct
+                if payload.trailingStopPct is not None
+                else strategy_settings.option_contract_trailing_stop_pct,
+                "max_trades_per_day": payload.maxTradesPerDay
+                if payload.maxTradesPerDay is not None
+                else strategy_settings.option_contract_max_trades_per_day,
                 "exchange": strategy_settings.zerodha_option_exchange,
                 "underlying": strategy_settings.zerodha_underlying,
                 "lot_size": strategy_settings.paper_trade_lot_size,
@@ -1428,7 +2070,7 @@ async def dashboard_stream(request: Request) -> StreamingResponse:
             else:
                 yield ": keepalive\n\n"
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(10)
 
     return StreamingResponse(
         event_generator(),
@@ -1461,7 +2103,7 @@ async def market_quotes_stream(request: Request) -> StreamingResponse:
             else:
                 yield ": keepalive\n\n"
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(10)
 
     return StreamingResponse(
         event_generator(),
@@ -1587,9 +2229,210 @@ def live_ltp(exchange: str, tradingsymbol: str, preferStream: bool = True) -> di
         state_store.close()
 
 
+@app.get("/api/dhan-live-trading")
+def dhan_live_trading_status(positionsOnly: bool = False) -> dict:
+    return _load_dhan_live_trading_payload(
+        get_settings(),
+        force_refresh=True,
+        positions_only=positionsOnly,
+    )
+
+
+@app.get("/api/dhan-live-trading/positions/stream")
+async def dhan_live_positions_stream(request: Request) -> StreamingResponse:
+    async def event_generator():
+        last_position_sync = 0.0
+        positions_initialized = False
+        positions: list[dict[str, Any]] = []
+
+        while not await request.is_disconnected():
+            now = asyncio.get_running_loop().time()
+            should_sync_positions = (
+                not positions_initialized or now - last_position_sync >= 60
+            )
+            if should_sync_positions:
+                payload = _load_dhan_live_trading_payload(
+                    get_settings(),
+                    force_refresh=True,
+                    positions_only=True,
+                )
+                positions = payload.get("positions") or []
+                last_position_sync = now
+                positions_initialized = True
+                yield f"data: {json.dumps({'type': 'positions', 'snapshot': payload})}\n\n"
+
+            active_positions = [
+                position for position in positions if dhan_position_quantity(position) != 0
+            ]
+            if not active_positions:
+                await asyncio.sleep(15)
+                continue
+
+            try:
+                async for event in _stream_dhan_ltp_quotes(request, active_positions):
+                    yield event
+                    if await request.is_disconnected():
+                        return
+                    if asyncio.get_running_loop().time() - last_position_sync >= 60:
+                        break
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                await asyncio.sleep(10)
+                last_position_sync = 0.0
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/dhan-live-trading/toggle")
+def dhan_live_trading_toggle(payload: LiveTradingToggleRequest) -> dict:
+    broker, state_store = _dhan_live_broker()
+    try:
+        _clear_dhan_live_trading_cache()
+        return {
+            "status": broker.set_enabled(
+                payload.enabled,
+                enabled_strategy_keys=payload.enabledStrategyKeys,
+            )
+        }
+    except DhanTradingError as exc:
+        _raise_live_error(exc)
+    finally:
+        broker.close()
+        state_store.close()
+
+
+@app.post("/api/dhan-live-trading/positions/exit")
+def dhan_live_exit_position(payload: DhanLivePositionExitRequest) -> dict:
+    broker, state_store = _dhan_live_broker()
+    try:
+        quantity = abs(int(payload.quantity))
+        transaction_type = payload.transactionType
+        if transaction_type is None:
+            transaction_type = dhan_exit_side_for_quantity(int(payload.quantity))
+        result = broker.exit_position(
+            security_id=payload.securityId.strip(),
+            trading_symbol=payload.tradingSymbol.strip().upper(),
+            exchange_segment=payload.exchangeSegment.strip().upper(),
+            product_type=payload.productType.strip().upper() or "INTRADAY",
+            quantity=quantity,
+            transaction_type=transaction_type,
+        )
+        _clear_dhan_live_trading_cache()
+        return result
+    except DhanTradingError as exc:
+        _raise_live_error(exc)
+    except Exception as exc:
+        _raise_live_error(exc)
+    finally:
+        broker.close()
+        state_store.close()
+
+
+@app.post("/api/dhan-live-trading/manual-entry")
+def dhan_live_manual_entry(payload: DhanLiveManualEntryRequest) -> dict:
+    broker, state_store = _dhan_live_broker()
+    try:
+        quantity = int(payload.quantity)
+        if quantity <= 0:
+            raise DhanTradingError("Quantity must be greater than zero.")
+        lot_size = int(getattr(broker.settings, "paper_trade_lot_size", 65) or 65)
+        if lot_size > 0 and quantity % lot_size != 0:
+            raise DhanTradingError(
+                f"Quantity must be in NIFTY lot multiples of {lot_size}."
+            )
+        security = broker.resolve_option_security(
+            underlying="NIFTY",
+            strike=payload.strike,
+            option_type=payload.optionType,
+            expiry=payload.expiry,
+        )
+        if not security:
+            raise DhanTradingError(
+                f"Dhan NIFTY {int(payload.strike)} {payload.optionType} instrument was not found in today's cache."
+            )
+        result = broker.place_order_and_wait(
+            transaction_type=payload.transactionType,
+            exchange_segment=security.get("exchangeSegment") or "NSE_FNO",
+            product_type=payload.productType.strip().upper() or "INTRADAY",
+            security_id=security["securityId"],
+            quantity=quantity,
+            order_type="MARKET",
+            validity="DAY",
+            correlation_id=f"manual-entry-{security['securityId']}",
+            timeout_seconds=15.0,
+            poll_seconds=0.5,
+        )
+        _clear_dhan_live_trading_cache()
+        return {
+            "status": "ok",
+            "security": security,
+            "order": result,
+        }
+    except DhanTradingError as exc:
+        _raise_live_error(exc)
+    except Exception as exc:
+        _raise_live_error(exc)
+    finally:
+        broker.close()
+        state_store.close()
+
+
+@app.post("/api/dhan/instrument-master/cache")
+def dhan_cache_instrument_master(payload: DhanInstrumentMasterCacheRequest) -> dict:
+    broker, state_store = _dhan_live_broker()
+    try:
+        return broker.cache_instrument_master(force=payload.force)
+    except Exception as exc:
+        _raise_live_error(exc)
+    finally:
+        broker.close()
+        state_store.close()
+
+
+@app.get("/api/dhan/instrument-master/status")
+def dhan_instrument_master_status() -> dict:
+    broker, state_store = _dhan_live_broker()
+    try:
+        return broker.instrument_master_cache_status()
+    finally:
+        broker.close()
+        state_store.close()
+
+
 @app.post("/api/zerodha/exchange")
 def zerodha_exchange(payload: ZerodhaExchangeRequest) -> dict:
     return _exchange_zerodha_request_token(payload.requestToken, payload.saveToEnv)
+
+
+@app.post("/api/option-candles/store")
+def store_option_candles(payload: ManualCandleStorageRequest) -> dict:
+    settings = get_settings()
+    now = datetime.now(settings.timezone)
+    instrument_ids = None if payload.instrument == "ALL" else [payload.instrument]
+    try:
+        stored_counts = collect_exact_option_candles(
+            settings,
+            now,
+            instrument_ids=instrument_ids,
+            force=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Option candle storage failed: {exc}") from exc
+
+    total_candles = sum(int(count or 0) for count in stored_counts.values())
+    return {
+        "status": "ok",
+        "runAt": now.isoformat(),
+        "instrument": payload.instrument,
+        "storedCounts": stored_counts,
+        "totalContracts": len(stored_counts),
+        "totalCandles": total_candles,
+        "message": f"Stored {total_candles} candles across {len(stored_counts)} option contracts.",
+    }
 
 
 @app.get("/kite/callback")
@@ -1656,39 +2499,6 @@ def run_backtest_api(payload: BacktestApiRequest) -> dict:
     )
 
 
-@app.post("/api/backtest/option-contract")
-def run_option_contract_backtest_api(payload: OptionContractBacktestApiRequest) -> dict:
-    settings = get_settings()
-    try:
-        return run_option_contract_backtest(
-            settings,
-            OptionContractBacktestRequest(
-                exchange=payload.exchange,
-                option_symbol=payload.optionSymbol,
-                option_symbol_2=payload.optionSymbol2,
-                interval=payload.interval,
-                signal_mode=payload.signalMode,
-                entry_signal=payload.entrySignal,
-                start_date=payload.startDate,
-                end_date=payload.endDate,
-                balance=payload.balance,
-                lot_size=payload.lotSize,
-                target_pct=payload.targetPct,
-                max_signal_candle_pct=payload.maxSignalCandlePct,
-                stop_loss_pct=payload.stopLossPct,
-                strike_offset=payload.strikeOffset,
-                stop_loss_mode=payload.stopLossMode,
-                cap_stop_loss=payload.capStopLoss,
-                require_vwap=payload.requireVwap,
-                entry_timing=payload.entryTiming,
-                entry_time=payload.entryTime,
-                exit_time=payload.exitTime,
-            ),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @app.post("/api/backtest/option-5m")
 @app.post("/api/backtest/nifty-5m")
 def run_five_minute_option_backtest_api(payload: FiveMinuteOptionBacktestApiRequest) -> dict:
@@ -1712,6 +2522,13 @@ def run_five_minute_option_backtest_api(payload: FiveMinuteOptionBacktestApiRequ
                 strike_offset=payload.strikeOffset,
                 entry_time=payload.entryTime,
                 exit_time=payload.exitTime,
+                expiry_offset=payload.expiryOffset,
+                require_vwap=payload.requireVwap,
+                min_volume_multiplier=payload.minVolumeMultiplier,
+                volume_lookback=payload.volumeLookback,
+                max_entry_gap_pct=payload.maxEntryGapPct,
+                trailing_stop_pct=payload.trailingStopPct,
+                max_trades_per_day=payload.maxTradesPerDay,
             ),
         )
     except ValueError as exc:
@@ -1721,12 +2538,8 @@ def run_five_minute_option_backtest_api(payload: FiveMinuteOptionBacktestApiRequ
 @app.post("/api/backtest/export")
 def export_backtest_api(payload: BacktestExportRequest) -> dict[str, Any]:
     settings = get_settings()
-    if payload.reportType == "option_summary":
-        path = _write_option_backtest_report_csv(payload.result, settings.timezone)
-        rows = 1
-    else:
-        path = _write_backtest_csv(payload.result, settings.timezone)
-        rows = len(payload.result.get("trades") or [])
+    path = _write_backtest_csv(payload.result, settings.timezone)
+    rows = len(payload.result.get("trades") or [])
     return {
         "status": "ok",
         "message": f"Backtest CSV saved to {path}.",

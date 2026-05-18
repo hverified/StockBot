@@ -22,8 +22,15 @@ class Settings:
     option_contract_max_signal_candle_pct: float
     option_contract_min_signal_candle_pct: float
     option_contract_strike_offset: int
+    option_contract_expiry_offset: int
     option_contract_stop_loss_mode: str
     option_contract_stop_loss_pct: float
+    option_contract_require_vwap: bool
+    option_contract_min_volume_multiplier: float
+    option_contract_volume_lookback: int
+    option_contract_max_entry_gap_pct: float
+    option_contract_trailing_stop_pct: float
+    option_contract_max_trades_per_day: int
     symbol: str
     interval: str
     period: str
@@ -60,6 +67,8 @@ class Settings:
     zerodha_underlying: str
     zerodha_enable_websocket: bool
     zerodha_quote_timeout_seconds: float
+    dhan_client_id: str
+    dhan_access_token: str
     mongodb_option_candles_collection: str
     enable_exact_candle_storage: bool
     nifty_store_strike_offsets: str
@@ -131,15 +140,23 @@ def get_settings() -> Settings:
         or "BUY",
         option_contract_target_pct=float(os.getenv("OPTION_CONTRACT_TARGET_PCT", "3")),
         option_contract_max_signal_candle_pct=float(
-            os.getenv("OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT", "10")
+            os.getenv("OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT", "8")
         ),
         option_contract_min_signal_candle_pct=float(
             os.getenv("OPTION_CONTRACT_MIN_SIGNAL_CANDLE_PCT", "0")
         ),
         option_contract_strike_offset=int(os.getenv("OPTION_CONTRACT_STRIKE_OFFSET", "0")),
+        option_contract_expiry_offset=int(os.getenv("OPTION_CONTRACT_EXPIRY_OFFSET", "0")),
         option_contract_stop_loss_mode=os.getenv("OPTION_CONTRACT_STOP_LOSS_MODE", "signal_low").strip().lower()
         or "signal_low",
         option_contract_stop_loss_pct=float(os.getenv("OPTION_CONTRACT_STOP_LOSS_PCT", "8")),
+        option_contract_require_vwap=os.getenv("OPTION_CONTRACT_REQUIRE_VWAP", "false").strip().lower()
+        in {"1", "true", "yes", "on"},
+        option_contract_min_volume_multiplier=float(os.getenv("OPTION_CONTRACT_MIN_VOLUME_MULTIPLIER", "0")),
+        option_contract_volume_lookback=int(os.getenv("OPTION_CONTRACT_VOLUME_LOOKBACK", "20")),
+        option_contract_max_entry_gap_pct=float(os.getenv("OPTION_CONTRACT_MAX_ENTRY_GAP_PCT", "0")),
+        option_contract_trailing_stop_pct=float(os.getenv("OPTION_CONTRACT_TRAILING_STOP_PCT", "0")),
+        option_contract_max_trades_per_day=int(os.getenv("OPTION_CONTRACT_MAX_TRADES_PER_DAY", "0")),
         symbol=os.getenv("NIFTY_SYMBOL", "^NSEI").strip() or "^NSEI",
         interval=os.getenv("NIFTY_INTERVAL", "5m").strip() or "5m",
         period=os.getenv("NIFTY_PERIOD", "5d").strip() or "5d",
@@ -177,7 +194,7 @@ def get_settings() -> Settings:
         force_weekend_runs=os.getenv("FORCE_WEEKEND_RUNS", "false").strip().lower()
         in {"1", "true", "yes", "on"},
         paper_trade_capital=float(os.getenv("PAPER_TRADE_CAPITAL", "100000")),
-        paper_trade_lot_size=int(os.getenv("PAPER_TRADE_LOT_SIZE", "75")),
+        paper_trade_lot_size=int(os.getenv("PAPER_TRADE_LOT_SIZE", "65")),
         paper_trade_slippage_pct=float(os.getenv("PAPER_TRADE_SLIPPAGE_PCT", "0.75")),
         paper_trade_target_pct=float(os.getenv("PAPER_TRADE_TARGET_PCT", "8")),
         paper_trade_max_sl_pct=float(os.getenv("PAPER_TRADE_MAX_SL_PCT", "8")),
@@ -198,9 +215,11 @@ def get_settings() -> Settings:
         zerodha_enable_websocket=os.getenv("ZERODHA_ENABLE_WEBSOCKET", "true").strip().lower()
         in {"1", "true", "yes", "on"},
         zerodha_quote_timeout_seconds=float(os.getenv("ZERODHA_QUOTE_TIMEOUT_SECONDS", "2.0")),
+        dhan_client_id=os.getenv("DHAN_CLIENT_ID", "").strip(),
+        dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN", "").strip(),
         mongodb_option_candles_collection=os.getenv("MONGODB_OPTION_CANDLES_COLLECTION", "option_candles").strip()
         or "option_candles",
-        enable_exact_candle_storage=os.getenv("ENABLE_EXACT_CANDLE_STORAGE", "true").strip().lower()
+        enable_exact_candle_storage=os.getenv("ENABLE_EXACT_CANDLE_STORAGE", "false").strip().lower()
         in {"1", "true", "yes", "on"},
         nifty_store_strike_offsets=os.getenv("NIFTY_STORE_STRIKE_OFFSETS", "-100,0,100,200").strip(),
         sensex_store_strike_offsets=os.getenv("SENSEX_STORE_STRIKE_OFFSETS", "-200,0,200").strip(),

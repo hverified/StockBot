@@ -10,7 +10,6 @@ from typing import Any
 
 import pandas as pd
 
-from nifty_alert_bot.config import interval_to_minutes, kite_interval
 from nifty_alert_bot.data import fetch_candles_between
 from nifty_alert_bot.exact_candle_repository import ExactCandleRepository
 from nifty_alert_bot.indicators import build_signal_frame
@@ -41,30 +40,6 @@ class BacktestRequest:
 
 
 @dataclass(frozen=True)
-class OptionContractBacktestRequest:
-    exchange: str
-    option_symbol: str
-    option_symbol_2: str
-    interval: str
-    signal_mode: str
-    entry_signal: str
-    start_date: str
-    end_date: str
-    balance: float
-    lot_size: int
-    target_pct: float
-    max_signal_candle_pct: float
-    stop_loss_pct: float
-    strike_offset: int
-    stop_loss_mode: str
-    cap_stop_loss: bool
-    require_vwap: bool
-    entry_timing: str
-    entry_time: str
-    exit_time: str
-
-
-@dataclass(frozen=True)
 class FiveMinuteOptionBacktestRequest:
     instrument: str
     mode: str
@@ -81,6 +56,13 @@ class FiveMinuteOptionBacktestRequest:
     strike_offset: int
     entry_time: str
     exit_time: str
+    expiry_offset: int = 0
+    require_vwap: bool = False
+    min_volume_multiplier: float = 0
+    volume_lookback: int = 20
+    max_entry_gap_pct: float = 0
+    trailing_stop_pct: float = 0
+    max_trades_per_day: int = 0
 
 
 def _round_to_step(value: float, step: int) -> int:
@@ -111,6 +93,7 @@ def _resolve_dynamic_backtest_contract(
     strike_offset: int,
     option_exchange: str,
     option_underlying: str,
+    expiry_offset: int = 0,
 ):
     if spot_frame.empty:
         raise ValueError(
@@ -132,6 +115,7 @@ def _resolve_dynamic_backtest_contract(
         entry_dt,
         exchange=option_exchange,
         underlying=option_underlying,
+        expiry_offset=expiry_offset,
     )
 
 
@@ -153,6 +137,7 @@ def _dynamic_contract_specs(
     option_underlying: str,
     max_expiry_gap_days: int | None = None,
     allow_cached: bool = True,
+    expiry_offset: int = 0,
 ) -> list[dict[str, Any]]:
     option_side = str(contract_input or "").strip().upper()
     if spot_frame.empty:
@@ -183,6 +168,7 @@ def _dynamic_contract_specs(
             underlying=option_underlying,
             max_expiry_gap_days=max_expiry_gap_days,
             allow_cached=allow_cached,
+            expiry_offset=expiry_offset,
         )
         if contract is None:
             continue
@@ -255,6 +241,107 @@ def _option_candle_range(row: pd.Series, strike: int, option_type: str) -> tuple
     return low_price, high_price, close_price
 
 
+def _synthetic_option_frame_from_underlying(
+    underlying_frame: pd.DataFrame,
+    strike: int,
+    option_type: str,
+    timezone,
+) -> pd.DataFrame:
+    if underlying_frame.empty:
+        return pd.DataFrame()
+
+    working = underlying_frame.copy()
+    if working.index.tz is None:
+        working.index = working.index.tz_localize(timezone)
+    else:
+        working.index = working.index.tz_convert(timezone)
+
+    rows: list[dict[str, Any]] = []
+    for index, row in working.iterrows():
+        option_open = _option_price_from_underlying(float(row["Open"]), strike, option_type)
+        option_close = _option_price_from_underlying(float(row["Close"]), strike, option_type)
+        if option_type == "CE":
+            option_low = _option_price_from_underlying(float(row["Low"]), strike, option_type)
+            option_high = _option_price_from_underlying(float(row["High"]), strike, option_type)
+        else:
+            option_low = _option_price_from_underlying(float(row["High"]), strike, option_type)
+            option_high = _option_price_from_underlying(float(row["Low"]), strike, option_type)
+        payload = {
+            "date": index,
+            "Open": round(option_open, 2),
+            "High": round(max(option_high, option_low, option_open, option_close), 2),
+            "Low": round(min(option_high, option_low, option_open, option_close), 2),
+            "Close": round(option_close, 2),
+            "Strike": int(strike),
+            "Spot": round(float(row["Close"]), 2),
+        }
+        if "Volume" in working.columns:
+            payload["Volume"] = row.get("Volume")
+        rows.append(payload)
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    frame.index = pd.to_datetime(frame.pop("date"))
+    if frame.index.tz is None:
+        frame.index = frame.index.tz_localize(timezone)
+    else:
+        frame.index = frame.index.tz_convert(timezone)
+    return frame.dropna(subset=["Open", "High", "Low", "Close"])
+
+
+def _synthetic_option_contract(
+    instrument_id: str,
+    strike: int,
+    option_type: str,
+    input_value: str,
+) -> OptionContract:
+    del input_value
+    return OptionContract(
+        exchange="YFINANCE_SYNTHETIC",
+        tradingsymbol=f"{instrument_id}{int(strike)}{option_type.upper()}",
+        instrument_token=0,
+        strike=int(strike),
+        option_type=option_type.upper(),
+        expiry="synthetic",
+    )
+
+
+def _synthetic_dynamic_contract_specs(
+    instrument,
+    contract_input: str,
+    contract_order: int,
+    spot_frame: pd.DataFrame,
+    timezone,
+    signal_interval_minutes: int,
+    strike_offset: int,
+) -> list[dict[str, Any]]:
+    option_side = str(contract_input or "").strip().upper()
+    if spot_frame.empty:
+        return []
+
+    strike_to_times: dict[int, set[str]] = {}
+    for index, row in spot_frame.iterrows():
+        candle_time = _signal_bucket(_as_ist(index, timezone), signal_interval_minutes)
+        spot = float(row["Close"])
+        atm = _round_to_step(spot, instrument.strike_step)
+        strike = atm + int(strike_offset or 0)
+        strike_to_times.setdefault(strike, set()).add(candle_time.isoformat())
+
+    return [
+        {
+            "input": contract_input,
+            "order": contract_order,
+            "contract": _synthetic_option_contract(instrument.id, strike, option_side, contract_input),
+            "option_side": option_side,
+            "strike_offset": strike_offset,
+            "active_times": active_times,
+            "data_provider": "yfinance_synthetic",
+        }
+        for strike, active_times in sorted(strike_to_times.items())
+    ]
+
+
 def _option_signal_candle_low(minute_rows: pd.DataFrame, fallback_row: pd.Series, strike: int, option_type: str) -> float:
     if minute_rows.empty:
         if option_type == "CE":
@@ -313,6 +400,20 @@ def _add_intraday_vwap(frame: pd.DataFrame) -> pd.DataFrame:
     cumulative_pv = (typical_price * volume).groupby(session).cumsum()
     cumulative_volume = volume.groupby(session).cumsum()
     output["VWAP"] = cumulative_pv / cumulative_volume.replace(0, pd.NA)
+    return output
+
+
+def _add_volume_average(frame: pd.DataFrame, lookback: int) -> pd.DataFrame:
+    if frame.empty or "Volume" not in frame.columns:
+        return frame.assign(VolumeAvg=pd.NA)
+
+    output = frame.copy()
+    period = max(1, int(lookback or 1))
+    output["VolumeAvg"] = (
+        output["Volume"]
+        .groupby(output.index.date)
+        .transform(lambda series: series.shift(1).rolling(period, min_periods=min(5, period)).mean())
+    )
     return output
 
 
@@ -539,471 +640,6 @@ def _resolve_long_stop_loss(
     return round(candle_low_stop, 2), "signal_option_candle_low"
 
 
-def run_option_contract_backtest(settings, request: OptionContractBacktestRequest) -> dict[str, Any]:
-    start_date = datetime.fromisoformat(request.start_date).date()
-    end_date = datetime.fromisoformat(request.end_date).date()
-    if end_date < start_date:
-        raise ValueError("Exit day must be on or after entry day.")
-
-    entry_window = parse_hhmm(request.entry_time)
-    exit_window = parse_hhmm(request.exit_time)
-    if exit_window <= entry_window:
-        raise ValueError("Exit time must be after entry time.")
-
-    from_dt = datetime.combine(start_date, time.min, tzinfo=settings.timezone)
-    to_dt = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=settings.timezone)
-    price_provider = OptionPriceProvider(settings)
-
-    try:
-        option_exchange = str(request.exchange or settings.zerodha_option_exchange).strip().upper()
-        if option_exchange == "BFO":
-            instrument = get_instrument_spec("SENSEX")
-            option_underlying = instrument.zerodha_underlying
-        else:
-            instrument = get_instrument_spec("NIFTY")
-            option_underlying = instrument.zerodha_underlying
-
-        signal_interval = str(request.interval or "1m").lower()
-        signal_interval_minutes = interval_to_minutes(signal_interval)
-        signal_kite_interval = kite_interval(signal_interval)
-        signal_mode = str(request.signal_mode or "both").lower()
-
-        contract_inputs = [
-            symbol.strip().upper()
-            for symbol in (request.option_symbol, request.option_symbol_2)
-            if symbol and symbol.strip()
-        ]
-        if not contract_inputs:
-            raise ValueError("At least one option contract is required.")
-
-        spot_frame = pd.DataFrame()
-        if any(_is_option_side(contract_input) for contract_input in contract_inputs):
-            spot_frame, _spot_source = _fetch_backtest_candles(
-                settings,
-                instrument,
-                price_provider,
-                start_date,
-                end_date,
-                "1m",
-            )
-
-        contract_contexts: list[dict[str, Any]] = []
-        signal_events: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        contract_specs: list[dict[str, Any]] = []
-        for contract_order, contract_input in enumerate(contract_inputs):
-            if _is_option_side(contract_input):
-                contract_specs.extend(
-                    _dynamic_contract_specs(
-                        price_provider,
-                        instrument,
-                        contract_input,
-                        contract_order,
-                        spot_frame,
-                        settings.timezone,
-                        signal_interval_minutes,
-                        int(request.strike_offset or 0),
-                        option_exchange,
-                        option_underlying,
-                    )
-                )
-                continue
-
-            contract = price_provider.find_contract_by_symbol(contract_input, option_exchange)
-            if contract is None:
-                contract = price_provider.resolve_contract_input(
-                    contract_input,
-                    datetime.now(settings.timezone).replace(second=0, microsecond=0),
-                    option_exchange,
-                    option_underlying,
-                )
-            if contract is None:
-                raise ValueError(
-                    f"Option contract not found: {contract_input}. "
-                    f"Check exchange {option_exchange}, underlying {option_underlying}, symbol, and token validity."
-                )
-            contract_specs.append(
-                {
-                    "input": contract_input,
-                    "order": contract_order,
-                    "contract": contract,
-                    "option_side": contract.option_type,
-                    "strike_offset": None,
-                    "active_times": None,
-                }
-            )
-
-        if not contract_specs:
-            raise ValueError(
-                "No live nearest-expiry option contracts could be resolved for the selected PE/CE sides. "
-                "If the matching contract is already expired, Option Backtest will not execute trades for it."
-            )
-
-        for spec in contract_specs:
-            contract_input = spec["input"]
-            contract = spec["contract"]
-
-            option_candles = _option_candles_to_frame(
-                price_provider.historical_option_candles(
-                    contract,
-                    from_dt,
-                    to_dt,
-                    interval=signal_kite_interval,
-                    use_cache=True,
-                ),
-                settings.timezone,
-            )
-            if option_candles.empty:
-                skipped.append(
-                    {
-                        "optionSymbol": contract.tradingsymbol,
-                        "reason": "no_option_candles",
-                        "message": f"No Zerodha {signal_interval} option candles returned for {contract.tradingsymbol}.",
-                    }
-                )
-                continue
-            option_candles = _add_intraday_vwap(option_candles)
-
-            minute_candles = _option_candles_to_frame(
-                price_provider.historical_option_candles(
-                    contract,
-                    from_dt,
-                    to_dt,
-                    interval="minute",
-                    use_cache=True,
-                ),
-                settings.timezone,
-            )
-            minute_candles = _add_intraday_vwap(minute_candles)
-            signal_frame = build_signal_frame(option_candles, signal_mode=signal_mode)
-            context = {
-                "input": contract_input,
-                "order": spec["order"],
-                "contract": contract,
-                "option_side": spec.get("option_side"),
-                "strike_offset": spec.get("strike_offset"),
-                "active_times": spec.get("active_times"),
-                "option_candles": option_candles,
-                "minute_candles": minute_candles,
-                "signal_frame": signal_frame,
-            }
-            contract_contexts.append(context)
-
-            for index in range(1, len(signal_frame)):
-                row = signal_frame.iloc[index]
-                signal = row.get("signal")
-                if pd.isna(signal):
-                    continue
-                signal = str(signal).upper()
-                if str(request.entry_signal or "BUY").upper() != "BOTH" and signal != str(request.entry_signal or "BUY").upper():
-                    continue
-
-                candle_time = _as_ist(signal_frame.index[index], settings.timezone)
-                active_times = context.get("active_times")
-                if active_times is not None and candle_time.isoformat() not in active_times:
-                    continue
-                execute_at = _signal_execution_time(
-                    candle_time,
-                    signal_interval_minutes,
-                    str(request.entry_timing or "next_minute").lower(),
-                )
-                signal_events.append(
-                    {
-                        "execute_at": execute_at,
-                        "candle_time": candle_time,
-                        "signal": signal,
-                        "row": row,
-                        "context": context,
-                    }
-                )
-
-        trades: list[dict[str, Any]] = []
-        last_exit_at: datetime | None = None
-        selected_signal_count = sum(int(context["signal_frame"]["signal"].notna().sum()) for context in contract_contexts)
-        fast_signal_count = sum(int(context["signal_frame"]["signal_st_10_1"].notna().sum()) for context in contract_contexts)
-        both_signal_count = sum(int(context["signal_frame"]["signal_both"].notna().sum()) for context in contract_contexts)
-
-        for event in sorted(signal_events, key=lambda item: (item["execute_at"], item["context"]["order"])):
-            execute_at = event["execute_at"]
-            candle_time = event["candle_time"]
-            signal = event["signal"]
-            row = event["row"]
-            context = event["context"]
-            contract = context["contract"]
-            option_candles = context["option_candles"]
-            minute_candles = context["minute_candles"]
-            session_start = _session_datetime(execute_at, entry_window)
-            session_end = _session_datetime(execute_at, exit_window)
-            if execute_at < session_start or execute_at > session_end:
-                skipped.append({"candleTime": candle_time.isoformat(), "signal": signal, "optionSymbol": contract.tradingsymbol, "reason": "outside_trade_window"})
-                continue
-            if last_exit_at and execute_at <= last_exit_at:
-                skipped.append({"candleTime": candle_time.isoformat(), "signal": signal, "optionSymbol": contract.tradingsymbol, "reason": "active_trade_overlap"})
-                continue
-
-            entry_candidate = _candle_at_or_after(minute_candles, execute_at) if not minute_candles.empty else None
-            if entry_candidate is not None:
-                entry_at, entry_row = entry_candidate
-                base_entry_price = round(float(entry_row["Open"]), 2)
-            else:
-                entry_at = execute_at
-                base_entry_price = round(float(row["Close"]), 2)
-            entry_price = _apply_entry_slippage(base_entry_price, settings.paper_trade_slippage_pct)
-            quantity = _normalize_quantity(request.balance, entry_price, request.lot_size)
-            if quantity < request.lot_size:
-                skipped.append({"candleTime": candle_time.isoformat(), "signal": signal, "optionSymbol": contract.tradingsymbol, "reason": "less_than_one_lot"})
-                continue
-
-            signal_vwap = row.get("VWAP")
-            signal_vwap_value = None if pd.isna(signal_vwap) else round(float(signal_vwap), 2)
-            if request.require_vwap and signal == "BUY":
-                if signal_vwap_value is None:
-                    skipped.append(
-                        {
-                            "candleTime": candle_time.isoformat(),
-                            "signal": signal,
-                            "optionSymbol": contract.tradingsymbol,
-                            "reason": "vwap_unavailable",
-                        }
-                    )
-                    continue
-                if float(row["Close"]) >= signal_vwap_value:
-                    skipped.append(
-                        {
-                            "candleTime": candle_time.isoformat(),
-                            "signal": signal,
-                            "optionSymbol": contract.tradingsymbol,
-                            "reason": "close_above_or_equal_vwap",
-                            "close": round(float(row["Close"]), 2),
-                            "vwap": signal_vwap_value,
-                        }
-                    )
-                    continue
-
-            signal_candle_open = round(float(row["Open"]), 2)
-            signal_candle_close = round(float(row["Close"]), 2)
-            signal_candle_body_pct = (
-                round((abs(signal_candle_close - signal_candle_open) / signal_candle_open) * 100.0, 2)
-                if signal_candle_open > 0
-                else None
-            )
-            if (
-                signal_candle_body_pct is not None
-                and signal_candle_body_pct > request.max_signal_candle_pct
-            ):
-                skipped.append(
-                    {
-                        "candleTime": candle_time.isoformat(),
-                        "signal": signal,
-                        "optionSymbol": contract.tradingsymbol,
-                        "reason": "signal_candle_body_above_limit",
-                        "signalCandleOpen": signal_candle_open,
-                        "signalCandleClose": signal_candle_close,
-                        "signalCandleBodyPct": signal_candle_body_pct,
-                        "maxSignalCandlePct": request.max_signal_candle_pct,
-                    }
-                )
-                continue
-
-            signal_candle_end = candle_time + timedelta(minutes=signal_interval_minutes)
-            signal_rows = option_candles[
-                (option_candles.index >= pd.Timestamp(candle_time))
-                & (option_candles.index < pd.Timestamp(signal_candle_end))
-            ]
-            candle_low_stop = round(float(signal_rows["Low"].min()), 2) if not signal_rows.empty else entry_price
-            stop_loss = _resolve_long_stop_loss(
-                entry_price,
-                candle_low_stop,
-                request.stop_loss_pct,
-                str(request.stop_loss_mode or "signal_low").lower(),
-                request.cap_stop_loss,
-            )
-            if stop_loss is None:
-                skipped.append({"candleTime": candle_time.isoformat(), "signal": signal, "optionSymbol": contract.tradingsymbol, "reason": "invalid_stop_loss_above_entry"})
-                continue
-            stop_loss_price, stop_loss_source = stop_loss
-            target_price = round(entry_price * (1 + request.target_pct / 100.0), 2)
-            if stop_loss_price >= entry_price or target_price <= entry_price:
-                skipped.append({"candleTime": candle_time.isoformat(), "signal": signal, "optionSymbol": contract.tradingsymbol, "reason": "invalid_risk_levels"})
-                continue
-
-            signal_frame = context["signal_frame"]
-            entry_trend = int(row.get("st_10_1_trend") or 1)
-            trend_flip_exit: dict[str, Any] | None = None
-            future_signal_rows = signal_frame[signal_frame.index > pd.Timestamp(candle_time)]
-            for trend_index, trend_row in future_signal_rows.iterrows():
-                if int(trend_row.get("st_10_1_trend") or entry_trend) == entry_trend:
-                    continue
-
-                trend_candle_time = _as_ist(trend_index, settings.timezone)
-                trend_flip_exit = {
-                    "candleTime": trend_candle_time,
-                    "exitTime": trend_candle_time + timedelta(minutes=signal_interval_minutes),
-                    "price": round(float(trend_row["Close"]), 2),
-                }
-                break
-
-            future_rows = minute_candles[
-                (minute_candles.index >= pd.Timestamp(entry_at))
-                & (minute_candles.index <= pd.Timestamp(session_end))
-            ] if not minute_candles.empty else option_candles[
-                (option_candles.index >= pd.Timestamp(entry_at))
-                & (option_candles.index <= pd.Timestamp(session_end))
-            ]
-            using_minute_rows = not minute_candles.empty
-            exit_price = None
-            base_exit_price = None
-            exit_at = None
-            exit_reason = "SESSION_CLOSE"
-            for future_index, future_row in future_rows.iterrows():
-                future_time = _as_ist(future_index, settings.timezone)
-                if (
-                    using_minute_rows
-                    and trend_flip_exit is not None
-                    and future_time >= trend_flip_exit["exitTime"]
-                ):
-                    base_exit_price = trend_flip_exit["price"]
-                    exit_price = trend_flip_exit["price"]
-                    exit_at = trend_flip_exit["exitTime"]
-                    exit_reason = "SUPER_TREND_FLIP"
-                    break
-
-                if float(future_row["Low"]) <= stop_loss_price:
-                    base_exit_price = stop_loss_price
-                    exit_price = stop_loss_price
-                    exit_at = future_time
-                    exit_reason = "STOP_LOSS"
-                    break
-                if float(future_row["High"]) >= target_price:
-                    base_exit_price = target_price
-                    exit_price = target_price
-                    exit_at = future_time
-                    exit_reason = "TARGET"
-                    break
-                if (
-                    not using_minute_rows
-                    and trend_flip_exit is not None
-                    and future_time + timedelta(minutes=signal_interval_minutes) >= trend_flip_exit["exitTime"]
-                ):
-                    base_exit_price = trend_flip_exit["price"]
-                    exit_price = trend_flip_exit["price"]
-                    exit_at = trend_flip_exit["exitTime"]
-                    exit_reason = "SUPER_TREND_FLIP"
-                    break
-
-            if exit_price is None:
-                if future_rows.empty:
-                    skipped.append({"candleTime": candle_time.isoformat(), "signal": signal, "optionSymbol": contract.tradingsymbol, "reason": "no_exit_candles_available"})
-                    continue
-                exit_row = future_rows.iloc[-1]
-                exit_at = _as_ist(future_rows.index[-1], settings.timezone)
-                base_exit_price = round(float(exit_row["Close"]), 2)
-                exit_price = _apply_exit_slippage(base_exit_price, settings.paper_trade_slippage_pct)
-
-            gross_pnl = round((exit_price - entry_price) * quantity, 2)
-            charges = _estimate_charges(entry_price, exit_price, quantity)
-            net_pnl = round(gross_pnl - charges, 2)
-            status = "WIN" if net_pnl >= 0 else "LOSS"
-            last_exit_at = exit_at
-            trades.append(
-                {
-                    "signal": signal,
-                    "instrument": "OPTION",
-                    "signalMode": signal_mode,
-                    "candleTime": candle_time.isoformat(),
-                    "entrySignalTrend": entry_trend,
-                    "entryTime": entry_at.isoformat(),
-                    "entryTiming": str(request.entry_timing or "next_minute").lower(),
-                    "exitTime": exit_at.isoformat() if exit_at else None,
-                    "trendFlipCandleTime": trend_flip_exit["candleTime"].isoformat()
-                    if exit_reason == "SUPER_TREND_FLIP" and trend_flip_exit is not None
-                    else None,
-                    "strike": contract.strike,
-                    "optionType": contract.option_type,
-                    "optionSymbol": contract.tradingsymbol,
-                    "vwap": signal_vwap_value,
-                    "vwapFilterEnabled": request.require_vwap,
-                    "signalCandleOpen": signal_candle_open,
-                    "signalCandleClose": signal_candle_close,
-                    "signalCandleBodyPct": signal_candle_body_pct,
-                    "entryPrice": entry_price,
-                    "baseEntryPrice": base_entry_price,
-                    "exitPrice": exit_price,
-                    "baseExitPrice": base_exit_price,
-                    "quantity": quantity,
-                    "capitalUsed": round(entry_price * quantity, 2),
-                    "stopLoss": stop_loss_price,
-                    "stopLossMode": str(request.stop_loss_mode or "signal_low").lower(),
-                    "stopLossSource": stop_loss_source,
-                    "target": target_price,
-                    "grossPnl": gross_pnl,
-                    "charges": charges,
-                    "netPnl": net_pnl,
-                    "status": status,
-                    "exitReason": exit_reason,
-                    "executionSource": "zerodha_option_candles",
-                }
-            )
-
-        contract_stats = []
-        for context in contract_contexts:
-            symbol = context["contract"].tradingsymbol
-            signal_frame = context["signal_frame"]
-            contract_trades = [trade for trade in trades if trade.get("optionSymbol") == symbol]
-            contract_skipped = [item for item in skipped if item.get("optionSymbol") == symbol]
-            contract_stats.append(
-                {
-                    "input": context["input"],
-                    "optionSymbol": symbol,
-                    "optionSide": context.get("option_side"),
-                    "strikeOffset": context.get("strike_offset"),
-                    "selectedSignals": int(signal_frame["signal"].notna().sum()),
-                    "fastSignals": int(signal_frame["signal_st_10_1"].notna().sum()),
-                    "bothSignals": int(signal_frame["signal_both"].notna().sum()),
-                    "trades": len(contract_trades),
-                    "skipped": len(contract_skipped),
-                    "netPnl": round(sum(float(trade.get("netPnl", 0.0) or 0.0) for trade in contract_trades), 2),
-                }
-            )
-        option_type_stats = _summarize_by_option_type(trades)
-
-        return {
-                "request": request.__dict__,
-                "summary": _summarize(trades),
-                "trades": trades,
-                "skipped": skipped[:100],
-                "data": {
-                "symbol": " / ".join(context["contract"].tradingsymbol for context in contract_contexts),
-                "instrument": "OPTION",
-                "instrumentLabel": " / ".join(context["contract"].tradingsymbol for context in contract_contexts),
-                "underlying": option_underlying,
-                "exchange": option_exchange,
-                "contracts": [context["contract"].tradingsymbol for context in contract_contexts],
-                "contractInputs": contract_inputs,
-                "contractStats": contract_stats,
-                "optionTypeStats": option_type_stats,
-                "lotSize": request.lot_size,
-                "strikeStep": instrument.strike_step,
-                "strikeOffset": request.strike_offset,
-                "maxSignalCandlePct": request.max_signal_candle_pct,
-                "interval": signal_interval,
-                "signalInterval": signal_interval,
-                "signalCandleCount": sum(len(context["signal_frame"]) for context in contract_contexts),
-                "signalMode": signal_mode,
-                "selectedSignalCount": selected_signal_count,
-                "fastSignalCount": fast_signal_count,
-                "bothSignalCount": both_signal_count,
-                "executionCandleCount": sum(len(context["minute_candles"]) for context in contract_contexts),
-                "candleCount": sum(len(context["signal_frame"]) for context in contract_contexts),
-                "pricingModel": "zerodha_option_candles",
-                "signalDataSource": f"zerodha_option_{signal_interval}",
-                "executionDataSource": "zerodha_option_1minute",
-            },
-        }
-    finally:
-        price_provider.close()
-
-
 def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestRequest) -> dict[str, Any]:
     start_date = datetime.fromisoformat(request.start_date).date()
     end_date = datetime.fromisoformat(request.end_date).date()
@@ -1067,22 +703,34 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "5m",
             )
             for order, side_input in enumerate(contract_inputs):
-                contract_specs.extend(
-                    _dynamic_contract_specs(
-                        price_provider,
-                        instrument,
-                        side_input,
-                        order,
-                        spot_frame,
-                        settings.timezone,
-                        signal_interval_minutes,
-                        int(request.strike_offset or 0),
-                        option_exchange,
-                        option_underlying,
-                        max_expiry_gap_days=max_historical_expiry_gap_days,
-                        allow_cached=False,
-                    )
+                resolved_specs = _dynamic_contract_specs(
+                    price_provider,
+                    instrument,
+                    side_input,
+                    order,
+                    spot_frame,
+                    settings.timezone,
+                    signal_interval_minutes,
+                    int(request.strike_offset or 0),
+                    option_exchange,
+                    option_underlying,
+                    max_expiry_gap_days=max_historical_expiry_gap_days,
+                    allow_cached=False,
+                    expiry_offset=int(request.expiry_offset or 0),
                 )
+                contract_specs.extend(resolved_specs)
+                if not resolved_specs:
+                    contract_specs.extend(
+                        _synthetic_dynamic_contract_specs(
+                            instrument,
+                            side_input,
+                            order,
+                            spot_frame,
+                            settings.timezone,
+                            signal_interval_minutes,
+                            int(request.strike_offset or 0),
+                        )
+                    )
         else:
             contract_inputs = [
                 value.strip().upper()
@@ -1122,6 +770,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                             underlying=option_underlying,
                             max_expiry_gap_days=max_historical_expiry_gap_days,
                             allow_cached=False,
+                            expiry_offset=int(request.expiry_offset or 0),
                         )
                         if contract is not None:
                             expiry_date = datetime.fromisoformat(contract.expiry).date() if contract.expiry else None
@@ -1146,6 +795,23 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                         current_day += timedelta(days=1)
 
                     contract_specs.extend(specs_by_symbol.values())
+                    if not specs_by_symbol:
+                        contract_specs.append(
+                            {
+                                "input": contract_input,
+                                "order": order,
+                                "contract": _synthetic_option_contract(
+                                    instrument.id,
+                                    strike,
+                                    option_type,
+                                    contract_input,
+                                ),
+                                "option_side": option_type,
+                                "strike_offset": None,
+                                "active_times": None,
+                                "data_provider": "yfinance_synthetic",
+                            }
+                        )
                     continue
 
                 contract = price_provider.resolve_contract_input(
@@ -1155,12 +821,34 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     option_underlying,
                     max_expiry_gap_days=max_historical_expiry_gap_days,
                     allow_cached=False,
+                    expiry_offset=int(request.expiry_offset or 0),
                 )
                 if contract is None:
-                    raise ValueError(
-                        f"Option contract not found for {instrument.id} {contract_input} near {start_date.isoformat()}. "
-                        "For expired historical contracts, exact option candles must already be stored in MongoDB."
+                    compact_tail = re.search(r"(\d{4,6})(CE|PE)$", contract_input)
+                    if compact_tail is None:
+                        raise ValueError(
+                            f"Option contract not found for {instrument.id} {contract_input} near {start_date.isoformat()}. "
+                            "Use compact symbols like 24200PE for yfinance synthetic fallback."
+                        )
+                    strike = int(compact_tail.group(1))
+                    option_type = compact_tail.group(2)
+                    contract_specs.append(
+                        {
+                            "input": contract_input,
+                            "order": order,
+                            "contract": _synthetic_option_contract(
+                                instrument.id,
+                                strike,
+                                option_type,
+                                contract_input,
+                            ),
+                            "option_side": option_type,
+                            "strike_offset": None,
+                            "active_times": None,
+                            "data_provider": "yfinance_synthetic",
+                        }
                     )
+                    continue
                 contract_specs.append(
                     {
                         "input": contract_input,
@@ -1197,6 +885,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
         both_green_candle_count = 0
         raw_buy_signal_count = 0
         body_accepted_signal_count = 0
+        synthetic_underlying_cache: dict[tuple[str, date, date], pd.DataFrame] = {}
         for spec in contract_specs:
             contract = spec["contract"]
             if spec.get("data_provider") == "stored_exact":
@@ -1209,6 +898,24 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     to_dt,
                 )
                 data_source = "stored_exact_option_5minute"
+            elif spec.get("data_provider") == "yfinance_synthetic":
+                cache_key = (instrument.id, warmup_start_date, end_date)
+                underlying_frame = synthetic_underlying_cache.get(cache_key)
+                if underlying_frame is None:
+                    underlying_frame = fetch_candles_between(
+                        instrument.yfinance_symbol,
+                        "5m",
+                        warmup_start_date.isoformat(),
+                        (end_date + timedelta(days=1)).isoformat(),
+                    )
+                    synthetic_underlying_cache[cache_key] = underlying_frame
+                option_candles = _synthetic_option_frame_from_underlying(
+                    underlying_frame,
+                    int(contract.strike),
+                    contract.option_type,
+                    settings.timezone,
+                )
+                data_source = "yfinance_synthetic_option_5minute"
             else:
                 option_candles = _option_candles_to_frame(
                     price_provider.historical_option_candles(
@@ -1225,11 +932,17 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 skipped.append(
                     {
                         "optionSymbol": contract.tradingsymbol,
-                        "reason": "no_option_candles",
+                        "reason": "no_yfinance_underlying_candles"
+                        if spec.get("data_provider") == "yfinance_synthetic"
+                        else "no_option_candles",
                     }
                 )
                 continue
 
+            option_candles = _add_volume_average(
+                _add_intraday_vwap(option_candles),
+                int(request.volume_lookback or 20),
+            )
             signal_frame = build_signal_frame(option_candles, signal_mode="both")
             context = {
                 "input": spec["input"],
@@ -1279,10 +992,64 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                         "close": signal_close,
                         "low": round(float(row["Low"]), 2),
                         "bodyPct": body_pct,
+                        "vwap": None if pd.isna(row.get("VWAP")) else round(float(row.get("VWAP")), 2),
+                        "volume": None if pd.isna(row.get("Volume")) else int(row.get("Volume")),
+                        "volumeAvg": None if pd.isna(row.get("VolumeAvg")) else round(float(row.get("VolumeAvg")), 2),
                         "fastTrend": int(row.get("st_10_1_trend") or 0),
                         "slowTrend": int(row.get("st_10_3_trend") or 0),
                     }
                 )
+                signal_vwap = row.get("VWAP")
+                if request.require_vwap:
+                    if pd.isna(signal_vwap):
+                        skipped.append(
+                            {
+                                "candleTime": candle_time.isoformat(),
+                                "signal": "BUY",
+                                "optionSymbol": contract.tradingsymbol,
+                                "reason": "vwap_unavailable",
+                            }
+                        )
+                        continue
+                    if signal_close >= float(signal_vwap):
+                        skipped.append(
+                            {
+                                "candleTime": candle_time.isoformat(),
+                                "signal": "BUY",
+                                "optionSymbol": contract.tradingsymbol,
+                                "reason": "close_above_or_equal_vwap",
+                                "close": signal_close,
+                                "vwap": round(float(signal_vwap), 2),
+                            }
+                        )
+                        continue
+                signal_volume = row.get("Volume")
+                signal_volume_avg = row.get("VolumeAvg")
+                if request.min_volume_multiplier and request.min_volume_multiplier > 0:
+                    if pd.isna(signal_volume) or pd.isna(signal_volume_avg) or float(signal_volume_avg) <= 0:
+                        skipped.append(
+                            {
+                                "candleTime": candle_time.isoformat(),
+                                "signal": "BUY",
+                                "optionSymbol": contract.tradingsymbol,
+                                "reason": "volume_average_unavailable",
+                            }
+                        )
+                        continue
+                    required_volume = float(signal_volume_avg) * float(request.min_volume_multiplier)
+                    if float(signal_volume) < required_volume:
+                        skipped.append(
+                            {
+                                "candleTime": candle_time.isoformat(),
+                                "signal": "BUY",
+                                "optionSymbol": contract.tradingsymbol,
+                                "reason": "volume_below_confirmation",
+                                "volume": int(signal_volume),
+                                "requiredVolume": round(required_volume, 2),
+                                "volumeAvg": round(float(signal_volume_avg), 2),
+                            }
+                        )
+                        continue
                 if body_pct is None or body_pct < request.min_body_pct or body_pct > request.max_body_pct:
                     skipped.append(
                         {
@@ -1342,6 +1109,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
 
         trades: list[dict[str, Any]] = []
         last_exit_at: datetime | None = None
+        trades_per_day: Counter = Counter()
         for event in sorted(signal_events, key=lambda item: (item["execute_at"], item["context"]["order"])):
             execute_at = event["execute_at"]
             candle_time = event["candle_time"]
@@ -1358,6 +1126,18 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
             if last_exit_at and execute_at <= last_exit_at:
                 skipped.append({"candleTime": candle_time.isoformat(), "optionSymbol": contract.tradingsymbol, "reason": "active_trade_overlap"})
                 continue
+            if request.max_trades_per_day and request.max_trades_per_day > 0:
+                trade_day = execute_at.date()
+                if trades_per_day[trade_day] >= request.max_trades_per_day:
+                    skipped.append(
+                        {
+                            "candleTime": candle_time.isoformat(),
+                            "optionSymbol": contract.tradingsymbol,
+                            "reason": "max_trades_per_day_reached",
+                            "maxTradesPerDay": request.max_trades_per_day,
+                        }
+                    )
+                    continue
 
             entry_candidate = _candle_at_or_after(option_candles, execute_at)
             if entry_candidate is None:
@@ -1371,6 +1151,30 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 else contract.tradingsymbol
             )
             base_entry_price = round(float(entry_row["Open"]), 2)
+            signal_close_for_gap = float(row["Close"])
+            entry_gap_pct = (
+                round(((base_entry_price - signal_close_for_gap) / signal_close_for_gap) * 100.0, 2)
+                if signal_close_for_gap > 0
+                else None
+            )
+            if (
+                request.max_entry_gap_pct
+                and request.max_entry_gap_pct > 0
+                and entry_gap_pct is not None
+                and entry_gap_pct > request.max_entry_gap_pct
+            ):
+                skipped.append(
+                    {
+                        "candleTime": candle_time.isoformat(),
+                        "optionSymbol": contract.tradingsymbol,
+                        "reason": "entry_gap_above_limit",
+                        "signalClose": round(signal_close_for_gap, 2),
+                        "entryOpen": base_entry_price,
+                        "entryGapPct": entry_gap_pct,
+                        "maxEntryGapPct": request.max_entry_gap_pct,
+                    }
+                )
+                continue
             entry_price = _apply_entry_slippage(base_entry_price, settings.paper_trade_slippage_pct)
             quantity = _normalize_quantity(request.balance, entry_price, instrument.lot_size)
             if quantity < instrument.lot_size:
@@ -1436,6 +1240,8 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
             base_exit_price = None
             exit_at = None
             exit_reason = "SESSION_CLOSE"
+            effective_stop_loss = stop_loss_price
+            effective_stop_loss_source = stop_loss_source
             for future_index, future_row in future_rows.iterrows():
                 future_time = _as_ist(future_index, settings.timezone)
                 if trend_flip_exit is not None and future_time >= trend_flip_exit["exitTime"]:
@@ -1444,8 +1250,8 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     exit_at = trend_flip_exit["exitTime"]
                     exit_reason = "SUPER_TREND_FLIP"
                     break
-                if float(future_row["Low"]) <= stop_loss_price:
-                    base_exit_price = stop_loss_price
+                if float(future_row["Low"]) <= effective_stop_loss:
+                    base_exit_price = effective_stop_loss
                     exit_price = _apply_exit_slippage(base_exit_price, settings.paper_trade_slippage_pct)
                     exit_at = future_time
                     exit_reason = "STOP_LOSS"
@@ -1456,6 +1262,14 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     exit_at = future_time
                     exit_reason = "TARGET"
                     break
+                if request.trailing_stop_pct and request.trailing_stop_pct > 0:
+                    trailing_candidate = round(
+                        float(future_row["High"]) * (1 - request.trailing_stop_pct / 100.0),
+                        2,
+                    )
+                    if trailing_candidate > effective_stop_loss and trailing_candidate < target_price:
+                        effective_stop_loss = trailing_candidate
+                        effective_stop_loss_source = f"trailing_{request.trailing_stop_pct:g}pct"
 
             if exit_price is None:
                 if future_rows.empty:
@@ -1471,6 +1285,7 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
             net_pnl = round(gross_pnl - charges, 2)
             status = "WIN" if net_pnl >= 0 else "LOSS"
             last_exit_at = exit_at
+            trades_per_day[entry_at.date()] += 1
             trades.append(
                 {
                     "signal": "BUY",
@@ -1488,6 +1303,10 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     "signalCandleClose": round(float(row["Close"]), 2),
                     "signalCandleLow": signal_low_stop,
                     "signalCandleBodyPct": event["signal_candle_body_pct"],
+                    "entryGapPct": entry_gap_pct,
+                    "vwap": None if pd.isna(row.get("VWAP")) else round(float(row.get("VWAP")), 2),
+                    "volume": None if pd.isna(row.get("Volume")) else int(row.get("Volume")),
+                    "volumeAvg": None if pd.isna(row.get("VolumeAvg")) else round(float(row.get("VolumeAvg")), 2),
                     "entryPrice": entry_price,
                     "baseEntryPrice": base_entry_price,
                     "exitPrice": exit_price,
@@ -1496,6 +1315,8 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                     "capitalUsed": round(entry_price * quantity, 2),
                     "stopLoss": stop_loss_price,
                     "stopLossSource": stop_loss_source,
+                    "finalStopLoss": effective_stop_loss,
+                    "finalStopLossSource": effective_stop_loss_source,
                     "target": target_price,
                     "grossPnl": gross_pnl,
                     "charges": charges,
@@ -1524,11 +1345,20 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "lotSize": instrument.lot_size,
                 "strikeStep": instrument.strike_step,
                 "strikeOffset": request.strike_offset,
+                "expiryOffset": request.expiry_offset,
                 "interval": "5m",
                 "signalMode": "both",
                 "entrySignal": "BUY",
                 "maxBodyPct": request.max_body_pct,
                 "minBodyPct": request.min_body_pct,
+                "advancedFilters": {
+                    "requireVwap": request.require_vwap,
+                    "minVolumeMultiplier": request.min_volume_multiplier,
+                    "volumeLookback": request.volume_lookback,
+                    "maxEntryGapPct": request.max_entry_gap_pct,
+                    "trailingStopPct": request.trailing_stop_pct,
+                    "maxTradesPerDay": request.max_trades_per_day,
+                },
                 "bothGreenCandleCount": both_green_candle_count,
                 "rawBuySignalCount": raw_buy_signal_count,
                 "freshBuyArrowCount": raw_buy_signal_count,
@@ -1543,6 +1373,8 @@ def run_five_minute_option_backtest(settings, request: FiveMinuteOptionBacktestR
                 "pricingModel": (
                     "stored_exact_option_5minute"
                     if any(context.get("data_source") == "stored_exact_option_5minute" for context in contract_contexts)
+                    else "yfinance_synthetic_option_5minute"
+                    if any(context.get("data_source") == "yfinance_synthetic_option_5minute" for context in contract_contexts)
                     else "zerodha_option_5minute"
                 ),
                 "signalDataSource": " / ".join(sorted({str(context.get("data_source")) for context in contract_contexts})),

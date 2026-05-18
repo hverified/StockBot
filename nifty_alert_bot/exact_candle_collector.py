@@ -38,8 +38,9 @@ def collect_exact_option_candles(
     settings,
     now: datetime,
     instrument_ids: list[str] | tuple[str, ...] | None = None,
+    force: bool = False,
 ) -> dict[str, int]:
-    if not settings.enable_exact_candle_storage:
+    if not force and not settings.enable_exact_candle_storage:
         return {}
 
     repository = ExactCandleRepository(
@@ -76,6 +77,7 @@ def collect_exact_option_candles(
                         underlying=instrument.zerodha_underlying,
                         max_expiry_gap_days=7,
                         allow_cached=False,
+                        expiry_offset=settings.option_contract_expiry_offset,
                     )
                     if contract is None:
                         continue

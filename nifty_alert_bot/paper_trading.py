@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ import pandas as pd
 from nifty_alert_bot.alerts import build_alert_payload, format_alert
 from nifty_alert_bot.config import kite_interval
 from nifty_alert_bot.data import fetch_latest_price
+from nifty_alert_bot.dhan_trading import DhanLiveTradingBroker, DhanTradingError
 from nifty_alert_bot.indicators import build_signal_frame
 from nifty_alert_bot.live_trading import LiveTradingBroker, LiveTradingError
 from nifty_alert_bot.option_price_provider import OptionPriceProvider
@@ -20,6 +22,7 @@ from nifty_alert_bot.scheduler import parse_hhmm
 
 
 logger = logging.getLogger(__name__)
+DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY = "dhan_nifty_5m_live"
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,42 @@ def _fill_average_price(fill: dict[str, Any] | None) -> float | None:
     return price if price > 0 else None
 
 
+def _is_dhan_live_strategy(state_key: str | None) -> bool:
+    return state_key == DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY
+
+
+def _broker_order_id(order: dict[str, Any] | None) -> str | None:
+    if not isinstance(order, dict):
+        return None
+    if order.get("orderId"):
+        return str(order.get("orderId"))
+    response = order.get("response") if isinstance(order.get("response"), dict) else {}
+    if response.get("orderId"):
+        return str(response.get("orderId"))
+    return None
+
+
+def _broker_order_status(order: dict[str, Any] | None) -> str:
+    if not isinstance(order, dict):
+        return ""
+    return str(order.get("status") or order.get("orderStatus") or "").upper()
+
+
+def _broker_order_average_price(order: dict[str, Any] | None) -> float | None:
+    if not isinstance(order, dict):
+        return None
+    for key in ("average_price", "averageTradedPrice", "averagePrice"):
+        price = _safe_float(order.get(key))
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _safe_correlation_id(prefix: str, trade_id: str) -> str:
+    suffix = re.sub(r"[^a-zA-Z0-9_-]+", "", str(trade_id or ""))[-16:]
+    return f"{prefix}-{suffix}"[:30]
+
+
 def _trade_window_end(now: datetime, end_hhmm: str, buffer_seconds: int) -> datetime:
     end_time = parse_hhmm(end_hhmm)
     return now.replace(
@@ -180,6 +219,7 @@ def _option_candles_to_frame(candles: list[dict[str, Any]], timezone) -> pd.Data
             "high": "High",
             "low": "Low",
             "close": "Close",
+            "volume": "Volume",
         }
     )
     frame.index = pd.to_datetime(frame["date"])
@@ -187,7 +227,35 @@ def _option_candles_to_frame(candles: list[dict[str, Any]], timezone) -> pd.Data
         frame.index = frame.index.tz_localize(timezone)
     else:
         frame.index = frame.index.tz_convert(timezone)
-    return frame[["Open", "High", "Low", "Close"]].dropna()
+    columns = ["Open", "High", "Low", "Close"]
+    if "Volume" in frame.columns:
+        columns.append("Volume")
+    return frame[columns].dropna()
+
+
+def _add_intraday_vwap(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "Volume" not in frame.columns:
+        return frame.assign(VWAP=pd.NA)
+    output = frame.copy()
+    typical_price = (output["High"] + output["Low"] + output["Close"]) / 3.0
+    volume = output["Volume"].fillna(0)
+    cumulative_pv = (typical_price * volume).groupby(output.index.date).cumsum()
+    cumulative_volume = volume.groupby(output.index.date).cumsum()
+    output["VWAP"] = cumulative_pv / cumulative_volume.replace(0, pd.NA)
+    return output
+
+
+def _add_volume_average(frame: pd.DataFrame, lookback: int) -> pd.DataFrame:
+    if frame.empty or "Volume" not in frame.columns:
+        return frame.assign(VolumeAvg=pd.NA)
+    period = max(1, int(lookback or 1))
+    output = frame.copy()
+    output["VolumeAvg"] = (
+        output["Volume"]
+        .groupby(output.index.date)
+        .transform(lambda series: series.shift(1).rolling(period, min_periods=min(5, period)).mean())
+    )
+    return output
 
 
 def _current_candle_start(now: datetime, interval_minutes: int) -> datetime:
@@ -220,6 +288,21 @@ def _format_option_contract_alert(row: pd.Series, contract_symbol: str, interval
     )
 
 
+def _strategy_display_name(trade: dict[str, Any]) -> str:
+    strategy_key = str(trade.get("strategy_key") or trade.get("strategyKey") or "")
+    if strategy_key == "option_contracts_5m":
+        return "NIFTY 5m Bot V1"
+    if strategy_key == "option_contracts_5m_v2":
+        return "NIFTY 5m Bot V2"
+    if strategy_key == DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY or trade.get("live_broker") == "dhan":
+        return "Dhan Live Bot"
+    if strategy_key == "option_contracts_1m":
+        return "NIFTY 1m Bot"
+    if strategy_key == "option_contracts_1m_sensex":
+        return "SENSEX 1m Bot"
+    return "NIFTY Bot"
+
+
 def _format_trade_entry_message(signal_block: str, trade: dict[str, Any]) -> str:
     live_lines = []
     if trade.get("live_entry_order_id"):
@@ -243,6 +326,7 @@ def _format_trade_entry_message(signal_block: str, trade: dict[str, Any]) -> str
             signal_block,
             "",
             "Entry",
+            f"Bot: {_strategy_display_name(trade)}",
             f"{trade['option_symbol']} · {trade.get('signal', '-')}",
             f"Qty: {trade.get('quantity', '-')}",
             f"Entry: ₹{float(trade['entry_price']):.2f}",
@@ -268,6 +352,7 @@ def _format_trade_exit_message(trade: dict[str, Any], *, exit_reason: str, exit_
     return "\n".join(
         [
             f"{status_icon} Trade exit · {status}",
+            f"Bot: {_strategy_display_name(trade)}",
             f"{trade['option_symbol']} · {trade.get('signal', '-')}",
             "",
             f"Reason: {exit_reason}",
@@ -332,7 +417,8 @@ class PaperTradingEngine:
         tag: str,
         live_entry_price: float | None = None,
     ) -> dict[str, Any] | None:
-        broker = LiveTradingBroker(self.settings, self.state_store)
+        is_dhan_live = _is_dhan_live_strategy(self.state_key)
+        broker = DhanLiveTradingBroker(self.settings, self.state_store) if is_dhan_live else LiveTradingBroker(self.settings, self.state_store)
         try:
             broker_status = broker.status()
             if not broker_status.get("enabled"):
@@ -356,12 +442,61 @@ class PaperTradingEngine:
                     self.settings.paper_trade_lot_size,
                 )
                 if live_quantity < self.settings.paper_trade_lot_size:
-                    raise LiveTradingError(
-                        "Live order skipped because Zerodha available cash "
+                    error_class = DhanTradingError if is_dhan_live else LiveTradingError
+                    raise error_class(
+                        f"Live order skipped because {'Dhan' if is_dhan_live else 'Zerodha'} available cash "
                         f"{live_available_cash:.2f} cannot buy one lot at {price_for_quantity:.2f}."
                     )
             elif live_quantity < self.settings.paper_trade_lot_size:
                 live_quantity = requested_quantity
+
+            if is_dhan_live:
+                dhan_security = trade.get("dhan_security")
+                if not isinstance(dhan_security, dict):
+                    dhan_security = broker.resolve_option_security(
+                        underlying=str(self.settings.zerodha_underlying),
+                        strike=trade["strike"],
+                        option_type=trade["option_type"],
+                        expiry=trade.get("expiry"),
+                    )
+                if not dhan_security:
+                    raise DhanTradingError(
+                        "Dhan securityId could not be resolved for "
+                        f"{trade.get('option_symbol')} ({trade.get('strike')} {trade.get('option_type')})."
+                    )
+                trade["dhan_security"] = dhan_security
+                trade["dhan_security_id"] = dhan_security["securityId"]
+                trade["dhan_exchange_segment"] = dhan_security.get("exchangeSegment") or "NSE_FNO"
+                live_order = broker.place_order_and_wait(
+                    transaction_type=transaction_type,
+                    exchange_segment=trade["dhan_exchange_segment"],
+                    product_type="INTRADAY",
+                    security_id=trade["dhan_security_id"],
+                    quantity=live_quantity,
+                    order_type="MARKET",
+                    validity="DAY",
+                    correlation_id=_safe_correlation_id(f"tw-{tag.replace('hverified-', '')}", trade["trade_id"]),
+                    timeout_seconds=15.0,
+                    poll_seconds=0.5,
+                )
+                live_order = live_order | {
+                    "broker": "dhan",
+                    "liveQuantity": live_quantity,
+                    "paperQuantity": requested_quantity,
+                    "liveAvailableCash": live_available_cash,
+                }
+                fill = live_order.get("fill") if isinstance(live_order.get("fill"), dict) else {}
+                if fill.get("confirmed") is not True:
+                    order_id = live_order.get("orderId")
+                    if order_id:
+                        try:
+                            broker.cancel_order_if_open(order_id=str(order_id))
+                        except Exception:
+                            logger.exception("Failed to cancel unconfirmed Dhan live order %s.", order_id)
+                    raise DhanTradingError(
+                        f"Dhan live {tag} order was not confirmed. Status: {fill.get('status') or 'unknown'}."
+                    )
+                return live_order
 
             return broker.place_order_and_wait(
                 exchange=str(trade["instrument_exchange"]),
@@ -373,6 +508,7 @@ class PaperTradingEngine:
                 validity="DAY",
                 tag=tag,
             ) | {
+                "broker": "zerodha",
                 "liveQuantity": live_quantity,
                 "paperQuantity": requested_quantity,
                 "liveAvailableCash": live_available_cash,
@@ -391,6 +527,7 @@ class PaperTradingEngine:
         if not live_order:
             return
 
+        trade["live_broker"] = live_order.get("broker") or ("dhan" if _is_dhan_live_strategy(self.state_key) else "zerodha")
         trade["live_entry_order_id"] = live_order.get("orderId")
         trade["live_entry_order_request"] = live_order.get("request")
         trade["live_entry_fill"] = live_order.get("fill")
@@ -469,20 +606,36 @@ class PaperTradingEngine:
 
         short_trade = _is_short_trade_signal(trade.get("signal"))
         exit_side = "BUY" if short_trade else "SELL"
-        broker = LiveTradingBroker(self.settings, self.state_store)
+        is_dhan_live = _is_dhan_live_strategy(self.state_key) or trade.get("live_broker") == "dhan"
+        broker = DhanLiveTradingBroker(self.settings, self.state_store) if is_dhan_live else LiveTradingBroker(self.settings, self.state_store)
         try:
             if not broker.status().get("enabled"):
                 return
-            orders = broker.place_broker_exit_orders(
-                exchange=str(trade["instrument_exchange"]),
-                tradingsymbol=str(trade["option_symbol"]),
-                transaction_type=exit_side,
-                quantity=live_quantity,
-                product="MIS",
-                target_price=float(trade["target_price"]),
-                stop_loss_price=float(trade["stop_loss_price"]),
-                sl_order_type=self.settings.live_trading_sl_order_type,
-            )
+            if is_dhan_live:
+                if not trade.get("dhan_security_id"):
+                    raise DhanTradingError("Dhan securityId is missing for broker-side exit orders.")
+                orders = broker.place_broker_exit_orders(
+                    security_id=str(trade["dhan_security_id"]),
+                    trading_symbol=str(trade["option_symbol"]),
+                    exchange_segment=str(trade.get("dhan_exchange_segment") or "NSE_FNO"),
+                    transaction_type=exit_side,
+                    quantity=live_quantity,
+                    product_type="INTRADAY",
+                    target_price=float(trade["target_price"]),
+                    stop_loss_price=float(trade["stop_loss_price"]),
+                    sl_order_type=self.settings.live_trading_sl_order_type,
+                )
+            else:
+                orders = broker.place_broker_exit_orders(
+                    exchange=str(trade["instrument_exchange"]),
+                    tradingsymbol=str(trade["option_symbol"]),
+                    transaction_type=exit_side,
+                    quantity=live_quantity,
+                    product="MIS",
+                    target_price=float(trade["target_price"]),
+                    stop_loss_price=float(trade["stop_loss_price"]),
+                    sl_order_type=self.settings.live_trading_sl_order_type,
+                )
         finally:
             broker.close()
 
@@ -491,9 +644,9 @@ class PaperTradingEngine:
         trade.update(
             {
                 "live_exit_order_mode": "broker_target_sl",
-                "live_target_order_id": target_order.get("orderId"),
+                "live_target_order_id": _broker_order_id(target_order),
                 "live_target_order_request": target_order.get("request"),
-                "live_stop_loss_order_id": stop_order.get("orderId"),
+                "live_stop_loss_order_id": _broker_order_id(stop_order),
                 "live_stop_loss_order_request": stop_order.get("request"),
                 "live_exit_orders_placed_at": datetime.now(self.settings.timezone).isoformat(),
             }
@@ -508,7 +661,8 @@ class PaperTradingEngine:
         if not any(order_ids.values()):
             return cancellations
 
-        broker = LiveTradingBroker(self.settings, self.state_store)
+        is_dhan_live = _is_dhan_live_strategy(self.state_key) or trade.get("live_broker") == "dhan"
+        broker = DhanLiveTradingBroker(self.settings, self.state_store) if is_dhan_live else LiveTradingBroker(self.settings, self.state_store)
         try:
             for key, order_id in order_ids.items():
                 if not order_id:
@@ -528,14 +682,16 @@ class PaperTradingEngine:
         if not target_order_id and not stop_order_id:
             return None
 
-        broker = LiveTradingBroker(self.settings, self.state_store)
+        is_dhan_live = _is_dhan_live_strategy(self.state_key) or trade.get("live_broker") == "dhan"
+        broker = DhanLiveTradingBroker(self.settings, self.state_store) if is_dhan_live else LiveTradingBroker(self.settings, self.state_store)
         try:
             target_order = broker.order_by_id(str(target_order_id)) if target_order_id else None
             stop_order = broker.order_by_id(str(stop_order_id)) if stop_order_id else None
-            target_status = str((target_order or {}).get("status") or "").upper()
-            stop_status = str((stop_order or {}).get("status") or "").upper()
+            target_status = _broker_order_status(target_order)
+            stop_status = _broker_order_status(stop_order)
+            filled_statuses = {"COMPLETE", "TRADED"}
 
-            if target_status == "COMPLETE":
+            if target_status in filled_statuses:
                 cancellation = None
                 if stop_order_id:
                     try:
@@ -546,7 +702,7 @@ class PaperTradingEngine:
                 fill = {
                     "confirmed": True,
                     "exitOrderType": "target",
-                    "averagePrice": _fill_average_price({"averagePrice": (target_order or {}).get("average_price")}),
+                    "averagePrice": _broker_order_average_price(target_order),
                     "raw": target_order,
                     "cancelledSibling": cancellation,
                 }
@@ -556,7 +712,7 @@ class PaperTradingEngine:
                     "fill": fill,
                 }
 
-            if stop_status == "COMPLETE":
+            if stop_status in filled_statuses:
                 cancellation = None
                 if target_order_id:
                     try:
@@ -567,7 +723,7 @@ class PaperTradingEngine:
                 fill = {
                     "confirmed": True,
                     "exitOrderType": "stop_loss",
-                    "averagePrice": _fill_average_price({"averagePrice": (stop_order or {}).get("average_price")}),
+                    "averagePrice": _broker_order_average_price(stop_order),
                     "raw": stop_order,
                     "cancelledSibling": cancellation,
                 }
@@ -577,17 +733,110 @@ class PaperTradingEngine:
                     "fill": fill,
                 }
 
-            terminal_problem_statuses = {"REJECTED", "CANCELLED"}
-            if target_status in terminal_problem_statuses or stop_status in terminal_problem_statuses:
+            terminal_problem_statuses = {"REJECTED", "CANCELLED", "EXPIRED"}
+            target_problem = target_status in terminal_problem_statuses
+            stop_problem = stop_status in terminal_problem_statuses
+            if target_problem or stop_problem:
                 trade["live_exit_order_warning"] = {
                     "targetStatus": target_status,
                     "stopLossStatus": stop_status,
+                    "targetOrderId": target_order_id,
+                    "stopLossOrderId": stop_order_id,
                     "checkedAt": datetime.now(self.settings.timezone).isoformat(),
+                }
+                logger.error(
+                    "Live protective exit order problem for %s: target=%s stopLoss=%s. Emergency exit will be attempted.",
+                    trade.get("trade_id"),
+                    target_status or "-",
+                    stop_status or "-",
+                )
+                return {
+                    "exit_reason": "BROKER_EXIT_ORDER_FAILED",
+                    "order_id": target_order_id if target_problem else stop_order_id,
+                    "fill": {
+                        "confirmed": False,
+                        "exitOrderType": "protective_order_failed",
+                        "targetStatus": target_status,
+                        "stopLossStatus": stop_status,
+                    },
+                    "requires_market_exit": True,
                 }
         finally:
             broker.close()
 
         return None
+
+    def _emergency_close_live_trade(
+        self,
+        trade: dict[str, Any],
+        *,
+        reason: str,
+        notifier,
+    ) -> CycleResult:
+        short_trade = _is_short_trade_signal(trade.get("signal"))
+        exit_side = "BUY" if short_trade else "SELL"
+        exit_timestamp = datetime.now(self.settings.timezone)
+        live_exit_order = self._submit_live_order_if_enabled(
+            trade,
+            transaction_type=exit_side,
+            tag="hverified-emergency-exit",
+        )
+        live_exit_average_price = _live_average_price(live_exit_order)
+        exit_price = round(
+            live_exit_average_price
+            if live_exit_average_price is not None
+            else float(trade.get("entry_price") or 0.0),
+            2,
+        )
+        pnl_quantity = (
+            int(trade.get("live_quantity") or trade["quantity"])
+            if trade.get("live_entry_order_id")
+            else int(trade["quantity"])
+        )
+        gross_pnl = _trade_gross_pnl(
+            float(trade["entry_price"]),
+            exit_price,
+            pnl_quantity,
+            trade.get("signal"),
+        )
+        charges = _estimate_charges(trade["entry_price"], exit_price, pnl_quantity)
+        net_pnl = round(gross_pnl - charges, 2)
+        status = "WIN" if net_pnl >= 0 else "LOSS"
+        trade.update(
+            {
+                "status": status,
+                "exit_reason": reason,
+                "exit_time": exit_timestamp.isoformat(),
+                "exit_price": exit_price,
+                "exit_price_source": f"{trade.get('live_broker') or 'broker'}_emergency_exit",
+                "live_exit_order_id": live_exit_order.get("orderId") if live_exit_order else None,
+                "live_exit_order_request": live_exit_order.get("request") if live_exit_order else None,
+                "live_exit_fill": live_exit_order.get("fill") if live_exit_order else None,
+                "pnl_quantity": pnl_quantity,
+                "pnl": gross_pnl,
+                "charges": charges,
+                "net_pnl": net_pnl,
+            }
+        )
+        self.paper_trade_repository.save_trade(trade)
+        self._notify(
+            notifier,
+            _format_trade_exit_message(
+                trade,
+                exit_reason=reason,
+                exit_price=exit_price,
+                net_pnl=net_pnl,
+                status=status,
+            ),
+            exit_timestamp,
+        )
+        return CycleResult(
+            status.lower(),
+            f"Live trade emergency closed with {status}. Reason: {reason}. Net PnL: {net_pnl:.2f}",
+            None,
+            details=trade.copy(),
+            alert_sent=True,
+        )
 
     def _record_signal_alert(
         self,
@@ -844,7 +1093,12 @@ class PaperTradingEngine:
 
         spot_before_entry = fetch_latest_price(self.settings.symbol)
         strike, option_type = _compute_itm_strike(spot_before_entry, signal)
-        contract = self.price_provider.resolve_contract(strike, option_type, now)
+        contract = self.price_provider.resolve_contract(
+            strike,
+            option_type,
+            now,
+            expiry_offset=self.settings.option_contract_expiry_offset,
+        )
         quoted_option_price, quoted_price_source = self.price_provider.quote_option(
             spot_before_entry,
             strike,
@@ -884,7 +1138,12 @@ class PaperTradingEngine:
 
         entry_time = datetime.now(self.settings.timezone)
         entry_spot = fetch_latest_price(self.settings.symbol)
-        contract = contract or self.price_provider.resolve_contract(strike, option_type, entry_time)
+        contract = contract or self.price_provider.resolve_contract(
+            strike,
+            option_type,
+            entry_time,
+            expiry_offset=self.settings.option_contract_expiry_offset,
+        )
         base_option_price, entry_price_source = self.price_provider.quote_option(
             entry_spot,
             strike,
@@ -1018,6 +1277,14 @@ class PaperTradingEngine:
                 "checkedAt": datetime.now(self.settings.timezone).isoformat(),
             }
             logger.exception("Failed to place broker-side live exit orders for %s.", trade["trade_id"])
+            if trade.get("live_entry_order_id") and _is_dhan_live_strategy(self.state_key):
+                paper_state["last_signal_key"] = signal_key
+                self._save_paper_state(paper_state)
+                return self._emergency_close_live_trade(
+                    trade,
+                    reason="BROKER_EXIT_SETUP_FAILED",
+                    notifier=notifier,
+                )
 
         paper_state["active_trade"] = trade
         paper_state["last_signal_key"] = signal_key
@@ -1048,6 +1315,10 @@ class PaperTradingEngine:
         frame = _option_candles_to_frame(candles, self.settings.timezone)
         if frame.empty:
             return frame
+        frame = _add_volume_average(
+            _add_intraday_vwap(frame),
+            self.settings.option_contract_volume_lookback,
+        )
         return build_signal_frame(
             frame,
             signal_mode=self.settings.option_contract_signal_mode,
@@ -1068,15 +1339,37 @@ class PaperTradingEngine:
         }
         if row is not None:
             signal = None if pd.isna(row.get("signal")) else str(row.get("signal")).upper()
+            candle_open = round(float(row.get("Open")), 2)
+            candle_high = round(float(row.get("High")), 2)
+            candle_low = round(float(row.get("Low")), 2)
+            candle_close = round(float(row.get("Close")), 2)
+            body_pct = (
+                round((abs(candle_close - candle_open) / candle_open) * 100.0, 2)
+                if candle_open > 0
+                else None
+            )
+            range_pct = (
+                round(((candle_high - candle_low) / candle_open) * 100.0, 2)
+                if candle_open > 0
+                else None
+            )
             detail.update(
                 {
                     "status": status or ("signal" if signal else "no_signal"),
                     "signal": signal,
-                    "close": round(float(row.get("Close")), 2),
+                    "open": candle_open,
+                    "high": candle_high,
+                    "low": candle_low,
+                    "close": candle_close,
                     "st_10_1": round(float(row.get("st_10_1")), 2),
                     "st_10_3": round(float(row.get("st_10_3")), 2),
                     "st_10_1_trend": int(row.get("st_10_1_trend")),
                     "st_10_3_trend": int(row.get("st_10_3_trend")),
+                    "strike": contract.strike if contract is not None else None,
+                    "strike_offset": self.settings.option_contract_strike_offset,
+                    "expiry": contract.expiry if contract is not None else None,
+                    "signal_candle_body_pct": body_pct,
+                    "signal_candle_range_pct": range_pct,
                     "candle_time": row.name.tz_convert(self.settings.timezone).strftime("%Y-%m-%d %H:%M:%S %Z"),
                 }
             )
@@ -1134,6 +1427,10 @@ class PaperTradingEngine:
         if current_trend == entry_trend:
             return None
 
+        interval_minutes = int(
+            trade.get("signal_interval_minutes")
+            or self.settings.option_contract_interval_minutes
+        )
         candle_time = latest_closed.name.tz_convert(self.settings.timezone).to_pydatetime()
         candle_close_time = candle_time + timedelta(
             minutes=interval_minutes,
@@ -1176,6 +1473,22 @@ class PaperTradingEngine:
                     "day_stop_reason": profit_stop_reason,
                 },
             )
+        if (
+            self.settings.option_contract_max_trades_per_day
+            and self.settings.option_contract_max_trades_per_day > 0
+            and int(paper_state.get("daily_trade_count", 0) or 0)
+            >= self.settings.option_contract_max_trades_per_day
+        ):
+            return CycleResult(
+                "skipped",
+                "Contract signal scan skipped because the V2 max trades/day limit is reached.",
+                None,
+                details={
+                    "strategy_mode": "option_contracts",
+                    "skip_reason": "max_trades_per_day_reached",
+                    "max_trades_per_day": self.settings.option_contract_max_trades_per_day,
+                },
+            )
 
         contract_details: list[dict[str, Any]] = []
         candidates: list[tuple[str, Any, pd.Series, str]] = []
@@ -1189,6 +1502,7 @@ class PaperTradingEngine:
                 now,
                 self.settings.zerodha_option_exchange,
                 self.settings.zerodha_underlying,
+                expiry_offset=self.settings.option_contract_expiry_offset,
             )
             if contract is None:
                 contract_details.append(self._contract_run_detail(contract_input, None, None))
@@ -1365,7 +1679,11 @@ class PaperTradingEngine:
                     "signal_candle_open": signal_candle_open,
                     "signal_candle_close": signal_candle_close,
                     "signal_candle_body_pct": signal_candle_body_pct,
-                    "signal_candle_range_pct": signal_candle_body_pct,
+                    "signal_candle_range_pct": (
+                        round(((signal_candle_high - signal_candle_low) / signal_candle_open) * 100.0, 2)
+                        if signal_candle_open > 0
+                        else None
+                    ),
                     "max_signal_candle_pct": self.settings.option_contract_max_signal_candle_pct,
                     "skip_reason": "signal_candle_body_above_limit",
                     "contract_signals": contract_details,
@@ -1394,9 +1712,109 @@ class PaperTradingEngine:
                     "signal_candle_open": signal_candle_open,
                     "signal_candle_close": signal_candle_close,
                     "signal_candle_body_pct": signal_candle_body_pct,
-                    "signal_candle_range_pct": signal_candle_body_pct,
+                    "signal_candle_range_pct": (
+                        round(((signal_candle_high - signal_candle_low) / signal_candle_open) * 100.0, 2)
+                        if signal_candle_open > 0
+                        else None
+                    ),
                     "min_signal_candle_pct": self.settings.option_contract_min_signal_candle_pct,
                     "skip_reason": "signal_candle_body_below_limit",
+                    "contract_signals": contract_details,
+                },
+            )
+        signal_vwap = closed_candle.get("VWAP")
+        if self.settings.option_contract_require_vwap:
+            if pd.isna(signal_vwap):
+                paper_state["last_signal_key"] = signal_key
+                self._save_paper_state(paper_state)
+                return CycleResult(
+                    "skipped",
+                    "Option-contract signal skipped because VWAP is unavailable.",
+                    closed_candle,
+                    details={
+                        "strategy_mode": "option_contracts",
+                        "option_symbol": contract.tradingsymbol,
+                        "skip_reason": "vwap_unavailable",
+                        "contract_signals": contract_details,
+                    },
+                )
+            if signal_candle_close >= float(signal_vwap):
+                paper_state["last_signal_key"] = signal_key
+                self._save_paper_state(paper_state)
+                return CycleResult(
+                    "skipped",
+                    "Option-contract signal skipped because close is above VWAP.",
+                    closed_candle,
+                    details={
+                        "strategy_mode": "option_contracts",
+                        "option_symbol": contract.tradingsymbol,
+                        "signal_candle_close": signal_candle_close,
+                        "vwap": round(float(signal_vwap), 2),
+                        "skip_reason": "close_above_or_equal_vwap",
+                        "contract_signals": contract_details,
+                    },
+                )
+        signal_volume = closed_candle.get("Volume")
+        signal_volume_avg = closed_candle.get("VolumeAvg")
+        if self.settings.option_contract_min_volume_multiplier > 0:
+            if pd.isna(signal_volume) or pd.isna(signal_volume_avg) or float(signal_volume_avg) <= 0:
+                paper_state["last_signal_key"] = signal_key
+                self._save_paper_state(paper_state)
+                return CycleResult(
+                    "skipped",
+                    "Option-contract signal skipped because volume average is unavailable.",
+                    closed_candle,
+                    details={
+                        "strategy_mode": "option_contracts",
+                        "option_symbol": contract.tradingsymbol,
+                        "skip_reason": "volume_average_unavailable",
+                        "contract_signals": contract_details,
+                    },
+                )
+            required_volume = float(signal_volume_avg) * self.settings.option_contract_min_volume_multiplier
+            if float(signal_volume) < required_volume:
+                paper_state["last_signal_key"] = signal_key
+                self._save_paper_state(paper_state)
+                return CycleResult(
+                    "skipped",
+                    "Option-contract signal skipped because volume confirmation failed.",
+                    closed_candle,
+                    details={
+                        "strategy_mode": "option_contracts",
+                        "option_symbol": contract.tradingsymbol,
+                        "volume": int(signal_volume),
+                        "volume_avg": round(float(signal_volume_avg), 2),
+                        "required_volume": round(required_volume, 2),
+                        "skip_reason": "volume_below_confirmation",
+                        "contract_signals": contract_details,
+                    },
+                )
+
+        entry_gap_pct = (
+            round(((base_option_price - signal_candle_close) / signal_candle_close) * 100.0, 2)
+            if signal_candle_close > 0
+            else None
+        )
+        if (
+            self.settings.option_contract_max_entry_gap_pct
+            and self.settings.option_contract_max_entry_gap_pct > 0
+            and entry_gap_pct is not None
+            and entry_gap_pct > self.settings.option_contract_max_entry_gap_pct
+        ):
+            paper_state["last_signal_key"] = signal_key
+            self._save_paper_state(paper_state)
+            return CycleResult(
+                "skipped",
+                "Option-contract signal skipped because entry gap is above limit.",
+                closed_candle,
+                details={
+                    "strategy_mode": "option_contracts",
+                    "option_symbol": contract.tradingsymbol,
+                    "signal_candle_close": signal_candle_close,
+                    "entry_price": entry_price,
+                    "entry_gap_pct": entry_gap_pct,
+                    "max_entry_gap_pct": self.settings.option_contract_max_entry_gap_pct,
+                    "skip_reason": "entry_gap_above_limit",
                     "contract_signals": contract_details,
                 },
             )
@@ -1440,6 +1858,7 @@ class PaperTradingEngine:
             "option_type": contract.option_type,
             "option_symbol": contract.tradingsymbol,
             "contract_input": contract.tradingsymbol,
+            "expiry_offset": self.settings.option_contract_expiry_offset,
             "instrument_exchange": contract.exchange,
             "instrument_token": contract.instrument_token,
             "expiry": contract.expiry,
@@ -1460,7 +1879,15 @@ class PaperTradingEngine:
             "signal_candle_open": signal_candle_open,
             "signal_candle_close": signal_candle_close,
             "signal_candle_body_pct": signal_candle_body_pct,
-            "signal_candle_range_pct": signal_candle_body_pct,
+            "signal_candle_range_pct": (
+                round(((signal_candle_high - signal_candle_low) / signal_candle_open) * 100.0, 2)
+                if signal_candle_open > 0
+                else None
+            ),
+            "entry_gap_pct": entry_gap_pct,
+            "vwap": None if pd.isna(signal_vwap) else round(float(signal_vwap), 2),
+            "volume": None if pd.isna(signal_volume) else int(signal_volume),
+            "volume_avg": None if pd.isna(signal_volume_avg) else round(float(signal_volume_avg), 2),
             "max_signal_candle_pct": self.settings.option_contract_max_signal_candle_pct,
             "min_signal_candle_pct": self.settings.option_contract_min_signal_candle_pct,
             "stop_loss_reference": signal_stop_price,
@@ -1470,6 +1897,7 @@ class PaperTradingEngine:
             "stop_loss_price": stop_loss_price,
             "target_price": round(entry_price * target_multiplier, 2),
             "target_pct": self.settings.option_contract_target_pct,
+            "trailing_stop_pct": self.settings.option_contract_trailing_stop_pct,
             "signal_interval": self.settings.option_contract_interval,
             "signal_interval_minutes": interval_minutes,
             "status": "OPEN",
@@ -1577,17 +2005,21 @@ class PaperTradingEngine:
             if broker_exit is not None:
                 exit_reason = broker_exit["exit_reason"]
                 broker_exit_fill = broker_exit.get("fill") or {}
-                exit_price_reference = (
-                    _fill_average_price(broker_exit_fill)
-                    or float(trade["target_price"] if exit_reason == "TARGET" else trade["stop_loss_price"])
-                )
-                live_price_source = "zerodha_broker_exit_order"
-                live_exit_order = {
-                    "orderId": broker_exit.get("order_id"),
-                    "request": None,
-                    "fill": broker_exit_fill,
-                }
-                option_price = exit_price_reference
+                if broker_exit.get("requires_market_exit"):
+                    option_price, live_price_source = self.price_provider.quote_trade(trade)
+                    exit_price_reference = option_price
+                else:
+                    exit_price_reference = (
+                        _fill_average_price(broker_exit_fill)
+                        or float(trade["target_price"] if exit_reason == "TARGET" else trade["stop_loss_price"])
+                    )
+                    live_price_source = f"{trade.get('live_broker') or 'zerodha'}_broker_exit_order"
+                    live_exit_order = {
+                        "orderId": broker_exit.get("order_id"),
+                        "request": None,
+                        "fill": broker_exit_fill,
+                    }
+                    option_price = exit_price_reference
             else:
                 option_price, live_price_source = self.price_provider.quote_trade(trade)
                 exit_price_reference = option_price
@@ -1611,6 +2043,28 @@ class PaperTradingEngine:
             elif now >= session_end:
                 exit_reason = "SESSION_CLOSE"
             elif trade.get("strategy_mode") == "option_contracts":
+                trailing_stop_pct = _safe_float(trade.get("trailing_stop_pct")) or 0
+                if not broker_exit_orders_active and trailing_stop_pct > 0:
+                    if short_trade:
+                        best_price = min(
+                            float(trade.get("best_price") or trade["entry_price"]),
+                            option_price,
+                        )
+                        trailing_stop = round(best_price * (1 + trailing_stop_pct / 100.0), 2)
+                        if trailing_stop < float(trade["stop_loss_price"]):
+                            trade["best_price"] = best_price
+                            trade["stop_loss_price"] = trailing_stop
+                            trade["stop_loss_source"] = f"trailing_{trailing_stop_pct:g}pct"
+                    else:
+                        best_price = max(
+                            float(trade.get("best_price") or trade["entry_price"]),
+                            option_price,
+                        )
+                        trailing_stop = round(best_price * (1 - trailing_stop_pct / 100.0), 2)
+                        if trailing_stop > float(trade["stop_loss_price"]):
+                            trade["best_price"] = best_price
+                            trade["stop_loss_price"] = trailing_stop
+                            trade["stop_loss_source"] = f"trailing_{trailing_stop_pct:g}pct"
                 interval_minutes = int(trade.get("signal_interval_minutes") or self.settings.option_contract_interval_minutes)
                 current_bucket = _current_candle_start(now, interval_minutes)
                 should_check_trend = (
@@ -1623,30 +2077,37 @@ class PaperTradingEngine:
                     should_check_trend = False
 
                 if should_check_trend:
-                    latest_trend = self._latest_trade_trend_row(trade, now)
-                    trend_exit = None
-                    if latest_trend is not None:
-                        contract, latest_closed = latest_trend
-                        if self.entry_event_callback is not None:
-                            try:
-                                self.entry_event_callback(
-                                    CycleResult(
-                                        "trend_update",
-                                        "Latest active-trade trend snapshot.",
-                                        latest_closed,
-                                        details={
-                                            "strategy_mode": "option_contracts",
-                                            "strategy_key": self.state_key,
-                                            "option_symbol": contract.tradingsymbol,
-                                            "active_trade_id": trade.get("trade_id"),
-                                            "active_trade_signal": trade.get("signal"),
-                                            "active_trade_status": trade.get("status"),
-                                        },
+                    try:
+                        latest_trend = self._latest_trade_trend_row(trade, now)
+                        trend_exit = None
+                        if latest_trend is not None:
+                            contract, latest_closed = latest_trend
+                            if self.entry_event_callback is not None:
+                                try:
+                                    self.entry_event_callback(
+                                        CycleResult(
+                                            "trend_update",
+                                            "Latest active-trade trend snapshot.",
+                                            latest_closed,
+                                            details={
+                                                "strategy_mode": "option_contracts",
+                                                "strategy_key": self.state_key,
+                                                "option_symbol": contract.tradingsymbol,
+                                                "active_trade_id": trade.get("trade_id"),
+                                                "active_trade_signal": trade.get("signal"),
+                                                "active_trade_status": trade.get("status"),
+                                            },
+                                        )
                                     )
-                                )
-                            except Exception:
-                                logger.exception("Failed to record active trade trend run event.")
-                        trend_exit = self._trend_flip_exit(trade, now, latest_closed)
+                                except Exception:
+                                    logger.exception("Failed to record active trade trend run event.")
+                            trend_exit = self._trend_flip_exit(trade, now, latest_closed)
+                    except Exception:
+                        logger.exception(
+                            "Active trade trend check failed for %s; continuing SL/target monitoring.",
+                            trade.get("trade_id"),
+                        )
+                        trend_exit = None
                     if trend_exit is not None:
                         exit_price_reference, exit_timestamp = trend_exit
                         exit_reason = "SUPER_TREND_FLIP"
@@ -1664,9 +2125,9 @@ class PaperTradingEngine:
                 if live_exit_average_price is not None:
                     exit_price = round(live_exit_average_price, 2)
                     exit_price_source = (
-                        "zerodha_broker_exit_order"
-                        if broker_exit is not None
-                        else "zerodha_live_fill"
+                        f"{trade.get('live_broker') or 'zerodha'}_broker_exit_order"
+                        if broker_exit is not None and not broker_exit.get("requires_market_exit")
+                        else f"{trade.get('live_broker') or 'zerodha'}_live_fill"
                     )
                 else:
                     exit_price = _exit_execution_price(

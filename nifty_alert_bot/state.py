@@ -61,6 +61,13 @@ class StateStore:
                 "updated_by": None,
                 "last_action": None,
             },
+            "dhan_live_trading": {
+                "enabled": False,
+                "enabled_strategy_keys": [],
+                "updated_at": None,
+                "updated_by": None,
+                "last_action": None,
+            },
         }
 
     def load_state(self) -> dict[str, Any]:
@@ -338,5 +345,20 @@ class StateStore:
             current = self._default_state()["live_trading"]
         current.update(payload)
         state["live_trading"] = current
+        self.save_state(state)
+        return current
+
+    def load_dhan_live_trading(self) -> dict[str, Any]:
+        payload = self.load_state().get("dhan_live_trading")
+        default_payload = self._default_state()["dhan_live_trading"]
+        return payload if isinstance(payload, dict) else default_payload.copy()
+
+    def save_dhan_live_trading(self, payload: dict[str, Any]) -> dict[str, Any]:
+        state = self.load_state()
+        current = state.get("dhan_live_trading")
+        if not isinstance(current, dict):
+            current = self._default_state()["dhan_live_trading"]
+        current.update(payload)
+        state["dhan_live_trading"] = current
         self.save_state(state)
         return current

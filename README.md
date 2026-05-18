@@ -68,17 +68,25 @@ Optional:
 - `OPTION_CONTRACT_SIGNAL_MODE` defaults to `both`; use `st_10_1` only if you explicitly want fast-Supertrend-only entries
 - `OPTION_CONTRACT_ENTRY_SIGNAL` defaults to `BUY`
 - `OPTION_CONTRACT_TARGET_PCT` defaults to `3`
-- `OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT` defaults to `10`; skips option-contract entries when the signal candle open-close body exceeds this percent
+- `OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT` defaults to `8`; skips option-contract entries when the signal candle open-close body exceeds this percent
 - `NIFTY_SYMBOL` defaults to `^NSEI`
 - `NIFTY_INTERVAL` defaults to `5m`
 - `NIFTY_PERIOD` defaults to `5d`
-- `NIFTY_LOT_SIZE` defaults to `75`
+- `NIFTY_LOT_SIZE` defaults to `65`
 - `NIFTY_STRIKE_STEP` defaults to `50`
 - `NIFTY_INDEX_EXCHANGE` defaults to `NSE`
 - `NIFTY_INDEX_TRADINGSYMBOL` defaults to `NIFTY 50`
 - `NIFTY_INDEX_TOKEN` defaults to `256265`
 - `NIFTY_OPTION_EXCHANGE` defaults to `NFO`
 - `NIFTY_ZERODHA_UNDERLYING` defaults to `NIFTY`
+- `BANKNIFTY_SYMBOL` defaults to `^NSEBANK`
+- `BANKNIFTY_LOT_SIZE` defaults to `30`
+- `BANKNIFTY_STRIKE_STEP` defaults to `100`
+- `BANKNIFTY_INDEX_EXCHANGE` defaults to `NSE`
+- `BANKNIFTY_INDEX_TRADINGSYMBOL` defaults to `NIFTY BANK`
+- `BANKNIFTY_INDEX_TOKEN` defaults to `260105`
+- `BANKNIFTY_OPTION_EXCHANGE` defaults to `NFO`
+- `BANKNIFTY_ZERODHA_UNDERLYING` defaults to `BANKNIFTY`
 - `SENSEX_SYMBOL` defaults to `^BSESN`
 - `SENSEX_LOT_SIZE` defaults to `20`
 - `SENSEX_STRIKE_STEP` defaults to `100`
@@ -94,7 +102,7 @@ Optional:
 - `SCHEDULE_BUFFER_SECONDS` defaults to `10` for index mode and `3` for option-contract mode
 - `FORCE_WEEKEND_RUNS` defaults to `false`; set to `true` only when manually testing on Saturday/Sunday
 - `PAPER_TRADE_CAPITAL` defaults to `100000`
-- `PAPER_TRADE_LOT_SIZE` defaults to `75`
+- `PAPER_TRADE_LOT_SIZE` defaults to `65`
 - `PAPER_TRADE_SLIPPAGE_PCT` defaults to `0.75`
 - `PAPER_TRADE_TARGET_PCT` defaults to `8`
 - `PAPER_TRADE_MAX_SL_PCT` defaults to `8`
@@ -127,7 +135,7 @@ OPTION_CONTRACT_2=24100CE
 OPTION_CONTRACT_INTERVAL=1m
 OPTION_CONTRACT_SIGNAL_MODE=both
 OPTION_CONTRACT_TARGET_PCT=3
-OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT=10
+OPTION_CONTRACT_MAX_SIGNAL_CANDLE_PCT=8
 SCHEDULE_INTERVAL_MINUTES=1
 SCHEDULE_BUFFER_SECONDS=2
 PAPER_TRADE_ENTRY_SECOND=2
@@ -287,7 +295,7 @@ The bot writes per-run structured logs locally. The dashboard reads run logs fro
   - keeps only one active trade at a time
   - waits one full candle after exit before allowing a new trade
   - buys the nearest ITM CE for `BUY` and nearest ITM PE for `SELL`
-  - sizes quantity from `~₹100,000` capital and NIFTY lot size `75`
+  - sizes quantity from `~₹100,000` capital and NIFTY lot size `65`
   - skips trades if stop-loss percentage is above `8%`
   - exits on stop-loss, target, or session close
   - prefers Zerodha option LTP for entry and exit monitoring when `ZERODHA_API_KEY` and `ZERODHA_ACCESS_TOKEN` are set

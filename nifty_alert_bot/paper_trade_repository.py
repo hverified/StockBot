@@ -12,9 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 class PaperTradeRepository:
+    _indexed_collections: set[tuple[str, str, str]] = set()
+
     def __init__(self, mongodb_uri: str, database: str, collection: str) -> None:
         self.client = MongoClient(mongodb_uri)
         self.collection = self.client[database][collection]
+        index_key = (mongodb_uri, database, collection)
+        if index_key in self._indexed_collections:
+            return
         self._create_index_safely(
             [("trade_id", 1)],
             unique=True,
@@ -22,6 +27,7 @@ class PaperTradeRepository:
         )
         self._create_index_safely([("trade_date", -1), ("entry_time", -1)])
         self._create_index_safely("status")
+        self._indexed_collections.add(index_key)
 
     def _create_index_safely(self, keys, **kwargs) -> None:
         try:

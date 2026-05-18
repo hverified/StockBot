@@ -8,12 +8,11 @@ import {
   DAILY_SETUP_KEYS,
   DEFAULT_DAILY_SETUP_FORM,
   DEFAULT_TABLE_PAGE_SIZE,
+  EXPIRY_OFFSET_OPTIONS,
   HourlyPnlReport,
   MarketQuoteCard,
   MetricCard,
   NAV_OPTIONS,
-  OPTION_BACKTEST_ENTRY_SIGNALS,
-  OPTION_BACKTEST_EXCHANGES,
   OVERVIEW_RANGE_OPTIONS,
   OptionTypeReport,
   PnlValue,
@@ -56,17 +55,22 @@ import {
   roundCurrencyNumber,
 } from "./lib/dashboardUtils.jsx";
 
+const DHAN_NIFTY_LOT_SIZE = 65;
+
 export function App() {
   const [activeView, setActiveView] = useState("overview");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [clockNow, setClockNow] = useState(() => new Date());
   const [theme, setTheme] = useState(() => {
     const savedTheme = window.localStorage.getItem("dashboard-theme");
-    return savedTheme === "light" || !savedTheme ? "warm" : savedTheme;
+    return ["warm", "cool", "finance"].includes(savedTheme)
+      ? savedTheme
+      : "warm";
   });
   const [data, setData] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsSource, setLogsSource] = useState("none");
+  const [logsMeta, setLogsMeta] = useState({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [logsLoading, setLogsLoading] = useState(true);
@@ -79,6 +83,10 @@ export function App() {
   const [streamStatus, setStreamStatus] = useState("connecting");
   const [zerodhaAuthBusy, setZerodhaAuthBusy] = useState(false);
   const [zerodhaConfirmOpen, setZerodhaConfirmOpen] = useState(false);
+  const [dhanMasterBusy, setDhanMasterBusy] = useState(false);
+  const [candleStorageBusy, setCandleStorageBusy] = useState(false);
+  const [candleStorageResult, setCandleStorageResult] = useState(null);
+  const [dhanMasterResult, setDhanMasterResult] = useState(null);
   const [liveTradingConfirmOpen, setLiveTradingConfirmOpen] = useState(false);
   const [contractForms, setContractForms] = useState({
     option_contracts_1m: { ...DEFAULT_DAILY_SETUP_FORM },
@@ -91,12 +99,28 @@ export function App() {
       targetPct: "8",
       minSignalCandlePct: "2",
       strikeOffset: "100",
+      expiryOffset: "0",
     },
-    option_contracts_5m_sensex: {
+    option_contracts_5m_v2: {
       ...DEFAULT_DAILY_SETUP_FORM,
       targetPct: "8",
       minSignalCandlePct: "2",
       strikeOffset: "100",
+      expiryOffset: "0",
+      requireVwap: false,
+      minVolumeMultiplier: "0",
+      volumeLookback: "20",
+      maxEntryGapPct: "0",
+      trailingStopPct: "0",
+      maxTradesPerDay: "0",
+    },
+    dhan_nifty_5m_live: {
+      ...DEFAULT_DAILY_SETUP_FORM,
+      contract1: "PE",
+      targetPct: "8",
+      minSignalCandlePct: "2",
+      strikeOffset: "100",
+      expiryOffset: "0",
       startingBalance: "100000",
     },
   });
@@ -151,29 +175,6 @@ export function App() {
   const [backtestResult, setBacktestResult] = useState(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestExportLoading, setBacktestExportLoading] = useState(false);
-  const [optionBacktestForm, setOptionBacktestForm] = useState({
-    exchange: "NFO",
-    optionSymbol: "",
-    optionSymbol2: "",
-    interval: "1m",
-    signalMode: "both",
-    entrySignal: "BUY",
-    startDate: getTodayInIst(),
-    endDate: getTodayInIst(),
-    balance: "100000",
-    lotSize: "75",
-    targetPct: "3",
-    maxSignalCandlePct: "10",
-    strikeOffset: "0",
-    stopLossPct: "8",
-    stopLossMode: "signal_low",
-    capStopLoss: true,
-    entryTiming: "signal_close",
-    entryTime: "09:30",
-    exitTime: "15:10",
-  });
-  const [optionBacktestResult, setOptionBacktestResult] = useState(null);
-  const [optionBacktestLoading, setOptionBacktestLoading] = useState(false);
   const [niftyFiveMinuteBacktestForm, setNiftyFiveMinuteBacktestForm] =
     useState({
       instrument: "NIFTY",
@@ -185,21 +186,212 @@ export function App() {
       endDate: getTodayInIst(),
       balance: "100000",
       targetPct: "8",
-      maxBodyPct: "10",
+      maxBodyPct: "8",
       minBodyPct: "2",
       stopLossPct: "8",
       strikeOffset: "100",
+      expiryOffset: "0",
       entryTime: "09:30",
       exitTime: "15:10",
+      requireVwap: false,
+      minVolumeMultiplier: "0",
+      volumeLookback: "20",
+      maxEntryGapPct: "0",
+      trailingStopPct: "0",
+      maxTradesPerDay: "0",
     });
   const [niftyFiveMinuteBacktestResult, setNiftyFiveMinuteBacktestResult] =
     useState(null);
   const [niftyFiveMinuteBacktestLoading, setNiftyFiveMinuteBacktestLoading] =
     useState(false);
+  const [backtestGroups, setBacktestGroups] = useState(() => {
+    try {
+      return JSON.parse(
+        window.localStorage.getItem("backtest-trade-groups") ?? "[]",
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [newBacktestGroupName, setNewBacktestGroupName] = useState("");
+  const [newBacktestGroupDescription, setNewBacktestGroupDescription] =
+    useState("");
+  const [selectedBacktestGroupId, setSelectedBacktestGroupId] = useState("");
+  const [activeBacktestGroupId, setActiveBacktestGroupId] = useState("");
+  const [backtestGroupAddFeedback, setBacktestGroupAddFeedback] =
+    useState(null);
   const [liveActionBusy, setLiveActionBusy] = useState("");
   const [liveSetupMarket, setLiveSetupMarket] = useState("NIFTY");
+  const [dhanManualEntryForm, setDhanManualEntryForm] = useState({
+    transactionType: "BUY",
+    optionType: "PE",
+    strike: "",
+    quantity: "65",
+    expiry: "",
+  });
+  const lastTradeRefreshLogKeyRef = useRef("");
+  const tradeRefreshInFlightRef = useRef(false);
   const dirtyContractStrategiesRef = useRef(new Set());
   const hydratedSetupSignaturesRef = useRef({});
+
+  function hasUsefulObjectValue(value) {
+    if (!value || typeof value !== "object") return false;
+    return Object.values(value).some((item) => {
+      if (item === null || item === undefined || item === "") return false;
+      if (Array.isArray(item)) return item.length > 0;
+      if (typeof item === "object") return Object.keys(item).length > 0;
+      return true;
+    });
+  }
+
+  function mergeLiveSnapshot(
+    previousSnapshot,
+    nextSnapshot,
+    { preserveBalance = false } = {},
+  ) {
+    if (!previousSnapshot) return nextSnapshot;
+    if (!nextSnapshot) return previousSnapshot;
+    const hasHeavyData =
+      (Array.isArray(nextSnapshot.orders) && nextSnapshot.orders.length > 0) ||
+      (Array.isArray(nextSnapshot.trades) && nextSnapshot.trades.length > 0) ||
+      (Array.isArray(nextSnapshot.positions) && nextSnapshot.positions.length > 0) ||
+      (Array.isArray(nextSnapshot.activePositions) && nextSnapshot.activePositions.length > 0) ||
+      hasUsefulObjectValue(nextSnapshot.balance) ||
+      hasUsefulObjectValue(nextSnapshot.funds) ||
+      hasUsefulObjectValue(nextSnapshot.margins);
+
+    if (hasHeavyData) {
+      return nextSnapshot;
+    }
+
+    const mergedSnapshot = {
+      ...previousSnapshot,
+      ...nextSnapshot,
+      status: nextSnapshot.status ?? previousSnapshot.status,
+      instrumentMaster:
+        nextSnapshot.instrumentMaster ?? previousSnapshot.instrumentMaster,
+      error: nextSnapshot.error ?? previousSnapshot.error,
+    };
+    if (preserveBalance) {
+      mergedSnapshot.balance = previousSnapshot.balance ?? nextSnapshot.balance;
+      mergedSnapshot.funds = previousSnapshot.funds ?? nextSnapshot.funds;
+    }
+    return mergedSnapshot;
+  }
+
+  function mergeDashboardPayload(previousPayload, nextPayload) {
+    if (!previousPayload) return nextPayload;
+    return {
+      ...nextPayload,
+      liveTrading: mergeLiveSnapshot(
+        previousPayload.liveTrading,
+        nextPayload.liveTrading,
+      ),
+      dhanLiveTrading: mergeLiveSnapshot(
+        previousPayload.dhanLiveTrading,
+        nextPayload.dhanLiveTrading,
+        { preserveBalance: true },
+      ),
+    };
+  }
+
+  function mergeDhanLiveTradingPayload(
+    currentPayload,
+    nextSnapshot,
+    { preserveBalance = false, preserveHistory = false } = {},
+  ) {
+    const previousSnapshot = (currentPayload ?? {}).dhanLiveTrading ?? {};
+    const mergedSnapshot = {
+      ...previousSnapshot,
+      ...nextSnapshot,
+      status: nextSnapshot.status ?? previousSnapshot.status,
+      instrumentMaster:
+        nextSnapshot.instrumentMaster ?? previousSnapshot.instrumentMaster,
+      error: nextSnapshot.error ?? previousSnapshot.error,
+    };
+
+    if (preserveBalance) {
+      mergedSnapshot.balance = hasUsefulObjectValue(nextSnapshot.balance)
+        ? nextSnapshot.balance
+        : previousSnapshot.balance;
+      mergedSnapshot.funds = hasUsefulObjectValue(nextSnapshot.funds)
+        ? nextSnapshot.funds
+        : previousSnapshot.funds;
+    }
+
+    if (preserveHistory) {
+      mergedSnapshot.orders =
+        Array.isArray(nextSnapshot.orders) && nextSnapshot.orders.length
+          ? nextSnapshot.orders
+          : previousSnapshot.orders;
+      mergedSnapshot.trades =
+        Array.isArray(nextSnapshot.trades) && nextSnapshot.trades.length
+          ? nextSnapshot.trades
+          : previousSnapshot.trades;
+    }
+
+    return {
+      ...(currentPayload ?? {}),
+      dhanLiveTrading: mergedSnapshot,
+    };
+  }
+
+  function firstNumericValue(payload, keys) {
+    for (const key of keys) {
+      const value = Number(payload?.[key]);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  }
+
+  function applyDhanLtpQuoteToSnapshot(previousSnapshot, quote) {
+    const securityId = String(quote?.securityId ?? "");
+    if (!securityId) return previousSnapshot;
+    const updatePosition = (position) => {
+      const positionSecurityId = String(
+        position.securityId ?? position.security_id ?? "",
+      );
+      if (positionSecurityId !== securityId) return position;
+
+      const quantity = Number(
+        position.netQuantity ?? position.netQty ?? position.quantity ?? 0,
+      );
+      const ltp = Number(quote.ltp);
+      const averagePrice = firstNumericValue(position, [
+        "averagePrice",
+        "buyAvg",
+        "buyAvgPrice",
+        "costPrice",
+        "avgPrice",
+      ]);
+      let pnl = Number(quote.pnl);
+      if (!Number.isFinite(pnl) && Number.isFinite(ltp) && averagePrice != null) {
+        pnl =
+          quantity >= 0
+            ? (ltp - averagePrice) * quantity
+            : (averagePrice - ltp) * Math.abs(quantity);
+      }
+
+      return {
+        ...position,
+        ltp: Number.isFinite(ltp) ? ltp : position.ltp,
+        lastTradedPrice: Number.isFinite(ltp)
+          ? ltp
+          : position.lastTradedPrice,
+        pnl: Number.isFinite(pnl) ? Number(pnl.toFixed(2)) : position.pnl,
+        unrealizedProfit: Number.isFinite(pnl)
+          ? Number(pnl.toFixed(2))
+          : position.unrealizedProfit,
+        quoteSource: quote.source ?? "dhan_websocket",
+      };
+    };
+
+    return {
+      ...previousSnapshot,
+      activePositions: (previousSnapshot.activePositions ?? []).map(updatePosition),
+      positions: (previousSnapshot.positions ?? []).map(updatePosition),
+    };
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -235,6 +427,13 @@ export function App() {
   }, [showHourlyPnl]);
 
   useEffect(() => {
+    window.localStorage.setItem(
+      "backtest-trade-groups",
+      JSON.stringify(backtestGroups),
+    );
+  }, [backtestGroups]);
+
+  useEffect(() => {
     const setups = data?.strategyConfig?.strategySetups;
     if (!setups) return;
 
@@ -257,11 +456,18 @@ export function App() {
             100000,
           entrySignal: setup.entrySignal ?? "BUY",
           targetPct: setup.targetPct ?? 3,
-          maxSignalCandlePct: setup.maxSignalCandlePct ?? 10,
+          maxSignalCandlePct: setup.maxSignalCandlePct ?? 8,
           minSignalCandlePct: setup.minSignalCandlePct ?? 0,
           strikeOffset: setup.strikeOffset ?? 0,
+          expiryOffset: setup.expiryOffset ?? 0,
           stopLossMode: setup.stopLossMode ?? "signal_low",
           stopLossPct: setup.stopLossPct ?? 8,
+          requireVwap: Boolean(setup.requireVwap),
+          minVolumeMultiplier: setup.minVolumeMultiplier ?? 0,
+          volumeLookback: setup.volumeLookback ?? 20,
+          maxEntryGapPct: setup.maxEntryGapPct ?? 0,
+          trailingStopPct: setup.trailingStopPct ?? 0,
+          maxTradesPerDay: setup.maxTradesPerDay ?? 0,
           updatedAt: setup.dailyContracts?.updated_at ?? "",
         });
 
@@ -285,11 +491,18 @@ export function App() {
           ),
           entrySignal: setup.entrySignal ?? "BUY",
           targetPct: String(setup.targetPct ?? 3),
-          maxSignalCandlePct: String(setup.maxSignalCandlePct ?? 10),
+          maxSignalCandlePct: String(setup.maxSignalCandlePct ?? 8),
           minSignalCandlePct: String(setup.minSignalCandlePct ?? 0),
           strikeOffset: String(setup.strikeOffset ?? 0),
+          expiryOffset: String(setup.expiryOffset ?? 0),
           stopLossMode: setup.stopLossMode ?? "signal_low",
           stopLossPct: String(setup.stopLossPct ?? 8),
+          requireVwap: Boolean(setup.requireVwap),
+          minVolumeMultiplier: String(setup.minVolumeMultiplier ?? 0),
+          volumeLookback: String(setup.volumeLookback ?? 20),
+          maxEntryGapPct: String(setup.maxEntryGapPct ?? 0),
+          trailingStopPct: String(setup.trailingStopPct ?? 0),
+          maxTradesPerDay: String(setup.maxTradesPerDay ?? 0),
         };
         changed = true;
       }
@@ -306,18 +519,20 @@ export function App() {
     let active = true;
     let eventSource;
 
-    async function loadDashboardSnapshot(showLoader = false) {
+    async function loadDashboardSnapshot(showLoader = false, lightweight = false) {
       if (showLoader) setLoading(true);
 
       try {
-        const response = await fetch(apiUrl("/api/dashboard"));
+        const response = await fetch(
+          apiUrl(`/api/dashboard${lightweight ? "?lightweight=true" : ""}`),
+        );
         if (!response.ok) {
           throw new Error(`Dashboard API failed with ${response.status}`);
         }
 
         const payload = await response.json();
         if (active) {
-          setData(payload);
+          setData((current) => mergeDashboardPayload(current, payload));
           setError("");
         }
       } catch (fetchError) {
@@ -333,30 +548,38 @@ export function App() {
       }
     }
 
-    loadDashboardSnapshot(true);
+    function connectDashboardStream() {
+      if (!active || eventSource) return;
 
-    eventSource = new EventSource(apiUrl("/api/dashboard/stream"));
-    eventSource.onopen = () => {
-      if (active) {
-        setStreamStatus("live");
-        setError("");
-      }
-    };
-    eventSource.onmessage = (event) => {
-      if (!active) return;
-      try {
-        setData(JSON.parse(event.data));
-        setLoading(false);
-        setStreamStatus("live");
-      } catch {
-        setStreamStatus("degraded");
-      }
-    };
-    eventSource.onerror = () => {
-      if (!active) return;
-      setStreamStatus("reconnecting");
-      loadDashboardSnapshot(false);
-    };
+      eventSource = new EventSource(apiUrl("/api/dashboard/stream"));
+      eventSource.onopen = () => {
+        if (active) {
+          setStreamStatus("live");
+          setError("");
+        }
+      };
+      eventSource.onmessage = (event) => {
+        if (!active) return;
+        try {
+          setData((current) =>
+            mergeDashboardPayload(current, JSON.parse(event.data)),
+          );
+          setLoading(false);
+          setStreamStatus("live");
+        } catch {
+          setStreamStatus("degraded");
+        }
+      };
+      eventSource.onerror = () => {
+        if (!active) return;
+        setStreamStatus("reconnecting");
+        loadDashboardSnapshot(false);
+      };
+    }
+
+    loadDashboardSnapshot(true, true).finally(() => {
+      loadDashboardSnapshot(false, false).finally(connectDashboardStream);
+    });
 
     return () => {
       active = false;
@@ -365,6 +588,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!["overview", "niftyFiveMinuteBot", "niftyFiveMinuteBotV2"].includes(activeView)) {
+      return undefined;
+    }
+
     let active = true;
     const eventSource = new EventSource(apiUrl("/api/market-quotes/stream"));
 
@@ -398,13 +625,123 @@ export function App() {
         } catch {
           // Ignore transient quote refresh failures.
         }
-      }, 1000);
+      }, 10000);
       eventSource.intervalId = intervalId;
     };
 
     return () => {
       active = false;
       if (eventSource.intervalId) window.clearInterval(eventSource.intervalId);
+      eventSource.close();
+    };
+  }, [activeView]);
+
+  useEffect(() => {
+    if (activeView !== "dhanLiveTrading") return undefined;
+
+    const eventSource = new EventSource(
+      apiUrl("/api/dhan-live-trading/positions/stream"),
+    );
+
+    eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "positions" && payload.snapshot) {
+          setData((current) =>
+            mergeDhanLiveTradingPayload(current, payload.snapshot, {
+              preserveBalance: true,
+              preserveHistory: true,
+            }),
+          );
+          return;
+        }
+        if (payload.type === "ltp" && payload.quote) {
+          setData((current) => ({
+            ...(current ?? {}),
+            dhanLiveTrading: applyDhanLtpQuoteToSnapshot(
+              (current ?? {}).dhanLiveTrading ?? {},
+              payload.quote,
+            ),
+          }));
+          return;
+        }
+        if (payload.type === "error" && payload.message) {
+          setData((current) =>
+            mergeDhanLiveTradingPayload(
+              current,
+              { error: payload.message },
+              { preserveBalance: true, preserveHistory: true },
+            ),
+          );
+        }
+      } catch {
+        // Ignore malformed stream events; the manual refresh button remains available.
+      }
+    };
+
+    eventSource.onerror = () => {
+      setData((current) =>
+        mergeDhanLiveTradingPayload(
+          current,
+          { error: "Dhan LTP stream reconnecting..." },
+          { preserveBalance: true, preserveHistory: true },
+        ),
+      );
+    };
+
+    return () => eventSource.close();
+  }, [activeView]);
+
+  useEffect(() => {
+    let active = true;
+    const today = getTodayInIst();
+    const eventSource = new EventSource(apiUrl(`/api/logs/stream?date=${today}`));
+    const refreshStatuses = new Set(["open", "win", "loss", "trend_update"]);
+
+    eventSource.onmessage = async (event) => {
+      if (!active) return;
+
+      try {
+        const payload = JSON.parse(event.data);
+        const logRows = Array.isArray(payload.logs) ? payload.logs : [];
+        const latestTradeLog = [...logRows].reverse().find((log) => {
+          const status = String(log?.status ?? "").toLowerCase();
+          return refreshStatuses.has(status);
+        });
+
+        if (!latestTradeLog) return;
+
+        const logKey = [
+          latestTradeLog.run_at,
+          latestTradeLog.status,
+          latestTradeLog.trade_id,
+          latestTradeLog.active_trade_id,
+          latestTradeLog.option_symbol,
+        ]
+          .filter(Boolean)
+          .join("::");
+
+        if (!logKey || lastTradeRefreshLogKeyRef.current === logKey) return;
+        lastTradeRefreshLogKeyRef.current = logKey;
+        if (tradeRefreshInFlightRef.current) return;
+
+        tradeRefreshInFlightRef.current = true;
+        try {
+          await refreshDashboardData();
+        } finally {
+          tradeRefreshInFlightRef.current = false;
+        }
+      } catch {
+        // The main dashboard stream remains the fallback if log SSE parsing fails.
+      }
+    };
+
+    eventSource.onerror = () => {
+      eventSource.close();
+    };
+
+    return () => {
+      active = false;
       eventSource.close();
     };
   }, []);
@@ -489,6 +826,9 @@ export function App() {
         if (active) {
           setLogs(payload.logs ?? []);
           setLogsSource(payload.source ?? "none");
+          setLogsMeta({
+            dhanLiveCachedCandle: payload.dhanLiveCachedCandle ?? null,
+          });
         }
       } catch (fetchError) {
         if (active) {
@@ -522,6 +862,9 @@ export function App() {
           const payload = JSON.parse(event.data);
           setLogs(payload.logs ?? []);
           setLogsSource(payload.source ?? "none");
+          setLogsMeta({
+            dhanLiveCachedCandle: payload.dhanLiveCachedCandle ?? null,
+          });
           setLogsLoading(false);
           setLogsStreamStatus("live");
         } catch {
@@ -571,7 +914,8 @@ export function App() {
         );
       }
 
-      setData(await dashboardResponse.json());
+      const dashboardPayload = await dashboardResponse.json();
+      setData((current) => mergeDashboardPayload(current, dashboardPayload));
 
       const logsResponse = await fetch(
         apiUrl(`/api/logs?date=${selectedDate}`),
@@ -580,6 +924,9 @@ export function App() {
         const logsPayload = await logsResponse.json();
         setLogs(logsPayload.logs ?? []);
         setLogsSource(logsPayload.source ?? "none");
+        setLogsMeta({
+          dhanLiveCachedCandle: logsPayload.dhanLiveCachedCandle ?? null,
+        });
       }
     } catch (triggerError) {
       setError(
@@ -597,15 +944,6 @@ export function App() {
     setBacktestForm((current) => ({
       ...current,
       [field]: value,
-    }));
-  }
-
-  function updateOptionBacktestField(field, value) {
-    setOptionBacktestForm((current) => ({
-      ...current,
-      [field]: value,
-      ...(field === "exchange" && value === "BFO" ? { lotSize: "20" } : {}),
-      ...(field === "exchange" && value === "NFO" ? { lotSize: "75" } : {}),
     }));
   }
 
@@ -641,6 +979,136 @@ export function App() {
     updateContractField(liveSetupStrategyKey, "contract2", contract2);
   }
 
+  function buildBacktestTradeId(trade) {
+    return [
+      trade.optionSymbol,
+      trade.candleTime,
+      trade.entryTime,
+      trade.exitTime,
+      trade.netPnl,
+    ]
+      .filter((value) => value !== null && value !== undefined)
+      .join("::");
+  }
+
+  function normalizeBacktestTradeForGroup(trade) {
+    const optionSymbol = String(trade.optionSymbol ?? "").toUpperCase();
+    const optionType = optionSymbol.endsWith("CE")
+      ? "CE"
+      : optionSymbol.endsWith("PE")
+        ? "PE"
+        : trade.optionType;
+    return {
+      ...trade,
+      id: buildBacktestTradeId(trade),
+      option_type: optionType,
+      optionType,
+      option_symbol: trade.optionSymbol,
+      entry_time: trade.entryTime,
+      exit_time: trade.exitTime,
+      net_pnl: trade.netPnl,
+      capital_used: trade.capitalUsed,
+      addedAt: new Date().toISOString(),
+      source: "5m_option_backtest",
+      backtestInstrument:
+        niftyFiveMinuteBacktestResult?.data?.underlying ?? "OPTION",
+    };
+  }
+
+  function createBacktestGroup(event) {
+    event.preventDefault();
+    const name = newBacktestGroupName.trim();
+    if (!name) {
+      setError("Enter a group name first.");
+      return;
+    }
+    const description = newBacktestGroupDescription.trim();
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const group = {
+      id,
+      name,
+      description,
+      createdAt: new Date().toISOString(),
+      trades: [],
+    };
+    setBacktestGroups((current) => [group, ...current]);
+    setNewBacktestGroupName("");
+    setNewBacktestGroupDescription("");
+    setSelectedBacktestGroupId(id);
+    setActiveBacktestGroupId(id);
+    setActionMessage(`Backtest group "${name}" created.`);
+  }
+
+  function addTradesToBacktestGroup(tradesToAdd) {
+    if (!selectedBacktestGroupId) {
+      setError("Create or select a backtest group first.");
+      return;
+    }
+    const normalizedTrades = tradesToAdd.map(normalizeBacktestTradeForGroup);
+    const targetGroup = backtestGroups.find(
+      (group) => group.id === selectedBacktestGroupId,
+    );
+    if (!targetGroup) {
+      setError("Selected backtest group was not found.");
+      return;
+    }
+    const existingIds = new Set(
+      (targetGroup?.trades ?? []).map(
+        (trade) => trade.id ?? buildBacktestTradeId(trade),
+      ),
+    );
+    const newTrades = normalizedTrades.filter((trade) => {
+      if (existingIds.has(trade.id)) return false;
+      existingIds.add(trade.id);
+      return true;
+    });
+    const feedbackMessage = newTrades.length
+      ? `Added ${formatCount(newTrades.length)} trade${newTrades.length === 1 ? "" : "s"} to ${targetGroup.name}.`
+      : `Already added to ${targetGroup.name}.`;
+    setBacktestGroupAddFeedback({
+      key: normalizedTrades.length === 1 ? normalizedTrades[0].id : "all",
+      message: feedbackMessage,
+      status: newTrades.length ? "success" : "neutral",
+    });
+    setBacktestGroups((current) =>
+      current.map((group) => {
+        if (group.id !== selectedBacktestGroupId) return group;
+        return {
+          ...group,
+          trades: [...(group.trades ?? []), ...newTrades],
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    );
+    setActionMessage(
+      newTrades.length ? feedbackMessage : "Those trades are already in the selected group.",
+    );
+    setError("");
+  }
+
+  function deleteBacktestGroup(groupId) {
+    setBacktestGroups((current) => current.filter((group) => group.id !== groupId));
+    if (selectedBacktestGroupId === groupId) setSelectedBacktestGroupId("");
+    if (activeBacktestGroupId === groupId) setActiveBacktestGroupId("");
+  }
+
+  function deleteTradeFromBacktestGroup(groupId, tradeId) {
+    if (!groupId || !tradeId) return;
+    setBacktestGroups((current) =>
+      current.map((group) => {
+        if (group.id !== groupId) return group;
+        return {
+          ...group,
+          trades: (group.trades ?? []).filter(
+            (trade) => (trade.id ?? buildBacktestTradeId(trade)) !== tradeId,
+          ),
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    );
+    setActionMessage("Trade removed from backtest group.");
+  }
+
   function fillStartingBalanceFromCash(strategyKey) {
     const strategyPaperTrading =
       data?.paperTradingByStrategy?.[strategyKey] ?? paperTrading;
@@ -655,6 +1123,15 @@ export function App() {
       "startingBalance",
       String(Math.floor(balanceLeft)),
     );
+  }
+
+  function getPaperPnlBase(strategyPaperTrading) {
+    const base = Number(
+      strategyPaperTrading?.startingBalance ??
+        strategyPaperTrading?.capitalBase ??
+        0,
+    );
+    return Number.isFinite(base) && base > 0 ? base : null;
   }
 
   async function saveStrategyContracts(
@@ -681,7 +1158,14 @@ export function App() {
           maxSignalCandlePct: Number(contractForm.maxSignalCandlePct),
           minSignalCandlePct: Number(contractForm.minSignalCandlePct),
           strikeOffset: Number(contractForm.strikeOffset),
+          expiryOffset: Number(contractForm.expiryOffset),
           stopLossPct: Number(contractForm.stopLossPct),
+          requireVwap: Boolean(contractForm.requireVwap),
+          minVolumeMultiplier: Number(contractForm.minVolumeMultiplier),
+          volumeLookback: Number(contractForm.volumeLookback),
+          maxEntryGapPct: Number(contractForm.maxEntryGapPct),
+          trailingStopPct: Number(contractForm.trailingStopPct),
+          maxTradesPerDay: Number(contractForm.maxTradesPerDay),
         }),
       });
 
@@ -699,7 +1183,8 @@ export function App() {
 
       const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
       if (dashboardResponse.ok) {
-        setData(await dashboardResponse.json());
+        const dashboardPayload = await dashboardResponse.json();
+        setData((current) => mergeDashboardPayload(current, dashboardPayload));
       }
     } catch (saveError) {
       setError(
@@ -764,7 +1249,10 @@ export function App() {
         };
       });
       const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
-      if (dashboardResponse.ok) setData(await dashboardResponse.json());
+      if (dashboardResponse.ok) {
+        const dashboardPayload = await dashboardResponse.json();
+        setData((current) => mergeDashboardPayload(current, dashboardPayload));
+      }
     } catch (balanceError) {
       setError(
         balanceError instanceof Error
@@ -799,7 +1287,8 @@ export function App() {
 
       const dashboardResponse = await fetch(apiUrl("/api/dashboard"));
       if (dashboardResponse.ok) {
-        setData(await dashboardResponse.json());
+        const dashboardPayload = await dashboardResponse.json();
+        setData((current) => mergeDashboardPayload(current, dashboardPayload));
       }
     } catch (deleteError) {
       setError(
@@ -893,97 +1382,84 @@ export function App() {
     }
   }
 
-  async function exportOptionBacktestReportCsv() {
-    if (!optionBacktestResult) {
-      setError("Run an option backtest before saving the report CSV.");
+  function csvCell(value) {
+    if (value === null || value === undefined) return "";
+    const stringValue = String(value);
+    if (/[",\n\r]/.test(stringValue)) {
+      return `"${stringValue.replaceAll('"', '""')}"`;
+    }
+    return stringValue;
+  }
+
+  function downloadCsvFile(filename, rows) {
+    const csv = rows
+      .map((row) => row.map((value) => csvCell(value)).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  }
+
+  function exportNiftyFiveMinuteBacktestTradesCsv() {
+    if (!niftyFiveMinuteBacktestTrades.length) {
+      setError("Run the 5m option backtest with trades before downloading CSV.");
       return;
     }
 
-    setBacktestExportLoading(true);
-    setActionMessage("");
-    setError("");
+    const instrument =
+      niftyFiveMinuteBacktestResult?.data?.underlying?.toLowerCase() ?? "option";
+    const rows = [
+      [
+        "Contract",
+        "Signal Candle",
+        "Entry Time",
+        "Exit Time",
+        "Entry Price",
+        "Exit Price",
+        "Stop Loss",
+        "Target",
+        "Stop Loss Source",
+        "Body %",
+        "Quantity",
+        "Capital Used",
+        "Gross PnL",
+        "Charges",
+        "Net PnL",
+        "Status",
+        "Exit Reason",
+      ],
+      ...niftyFiveMinuteBacktestTrades.map((trade) => [
+        formatCompactOptionSymbol(trade.optionSymbol),
+        formatTableDateTime(trade.candleTime),
+        formatTableDateTime(trade.entryTime),
+        formatTableDateTime(trade.exitTime),
+        trade.entryPrice,
+        trade.exitPrice,
+        trade.stopLoss,
+        trade.target,
+        formatSnakeLabel(trade.stopLossSource),
+        trade.signalCandleBodyPct,
+        trade.quantity,
+        trade.capitalUsed,
+        trade.grossPnl,
+        trade.charges,
+        trade.netPnl,
+        trade.status,
+        formatSnakeLabel(trade.exitReason),
+      ]),
+    ];
 
-    try {
-      const response = await fetch(apiUrl("/api/backtest/export"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          result: optionBacktestResult,
-          reportType: "option_summary",
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(
-          `Option report CSV export failed with ${response.status}`,
-        );
-      }
-
-      const payload = await response.json();
-      setActionMessage(payload.message ?? "Option report CSV saved.");
-    } catch (exportError) {
-      setError(
-        exportError instanceof Error
-          ? exportError.message
-          : "Unable to export option report CSV.",
-      );
-    } finally {
-      setBacktestExportLoading(false);
-    }
-  }
-
-  async function runOptionContractBacktest(event) {
-    event.preventDefault();
-    setOptionBacktestLoading(true);
-    setActionMessage("");
-    setError("");
-
-    try {
-      const response = await fetch(apiUrl("/api/backtest/option-contract"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          exchange: optionBacktestForm.exchange,
-          optionSymbol: optionBacktestForm.optionSymbol.trim().toUpperCase(),
-          optionSymbol2: optionBacktestForm.optionSymbol2.trim().toUpperCase(),
-          interval: optionBacktestForm.interval,
-          signalMode: optionBacktestForm.signalMode,
-          entrySignal: optionBacktestForm.entrySignal,
-          startDate: optionBacktestForm.startDate,
-          endDate: optionBacktestForm.endDate,
-          balance: Number(optionBacktestForm.balance),
-          lotSize: optionBacktestForm.exchange === "BFO" ? 20 : 75,
-          targetPct: Number(optionBacktestForm.targetPct),
-          maxSignalCandlePct: Number(optionBacktestForm.maxSignalCandlePct),
-          strikeOffset: Number(optionBacktestForm.strikeOffset),
-          stopLossPct: Number(optionBacktestForm.stopLossPct),
-          stopLossMode: optionBacktestForm.stopLossMode,
-          capStopLoss: optionBacktestForm.stopLossMode !== "percent",
-          requireVwap: false,
-          entryTiming: "signal_close",
-          entryTime: optionBacktestForm.entryTime,
-          exitTime: optionBacktestForm.exitTime,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Option backtest failed with ${response.status}`);
-      }
-
-      setOptionBacktestResult(await response.json());
-    } catch (backtestError) {
-      setError(
-        backtestError instanceof Error
-          ? backtestError.message
-          : "Unable to run option contract backtest.",
-      );
-    } finally {
-      setOptionBacktestLoading(false);
-    }
+    downloadCsvFile(
+      `${instrument}_5m_backtest_trades_${getTodayInIst()}.csv`,
+      rows,
+    );
+    setActionMessage("5m backtest trades CSV downloaded.");
   }
 
   async function runNiftyFiveMinuteBacktest(event) {
@@ -1016,8 +1492,17 @@ export function App() {
           minBodyPct: Number(niftyFiveMinuteBacktestForm.minBodyPct),
           stopLossPct: Number(niftyFiveMinuteBacktestForm.stopLossPct),
           strikeOffset: niftyFiveMinuteBacktestForm.strikeOffset,
+          expiryOffset: Number(niftyFiveMinuteBacktestForm.expiryOffset),
           entryTime: niftyFiveMinuteBacktestForm.entryTime,
           exitTime: niftyFiveMinuteBacktestForm.exitTime,
+          requireVwap: Boolean(niftyFiveMinuteBacktestForm.requireVwap),
+          minVolumeMultiplier: Number(
+            niftyFiveMinuteBacktestForm.minVolumeMultiplier,
+          ),
+          volumeLookback: Number(niftyFiveMinuteBacktestForm.volumeLookback),
+          maxEntryGapPct: Number(niftyFiveMinuteBacktestForm.maxEntryGapPct),
+          trailingStopPct: Number(niftyFiveMinuteBacktestForm.trailingStopPct),
+          maxTradesPerDay: Number(niftyFiveMinuteBacktestForm.maxTradesPerDay),
         }),
       });
 
@@ -1050,8 +1535,10 @@ export function App() {
     paperTradingByStrategy.option_contracts_1m_sensex ?? {};
   const niftyFiveMinutePaperTrading =
     paperTradingByStrategy.option_contracts_5m ?? {};
-  const sensexFiveMinutePaperTrading =
-    paperTradingByStrategy.option_contracts_5m_sensex ?? {};
+  const niftyFiveMinuteV2PaperTrading =
+    paperTradingByStrategy.option_contracts_5m_v2 ?? {};
+  const dhanLivePaperTrading =
+    paperTradingByStrategy.dhan_nifty_5m_live ?? {};
   const paperTrading = niftyPaperTrading;
   const liveTrading = data?.liveTrading ?? {};
   const liveTradingStatus = liveTrading.status ?? {};
@@ -1060,6 +1547,47 @@ export function App() {
   const livePositions = liveTrading.positions ?? {};
   const liveMargins = liveTrading.margins ?? {};
   const liveBalance = liveTrading.balance ?? {};
+  const dhan = data?.dhan ?? {};
+  const dhanLiveTrading = data?.dhanLiveTrading ?? {};
+  const dhanLiveStatus = dhanLiveTrading.status ?? {};
+  const dhanInstrumentMaster =
+    dhanLiveTrading.instrumentMaster ?? dhanMasterResult ?? {};
+  const dhanOrders = dhanLiveTrading.orders ?? [];
+  const dhanTrades = dhanLiveTrading.trades ?? [];
+  const dhanPositions = dhanLiveTrading.positions ?? [];
+  const dhanActivePositions =
+    dhanLiveTrading.activePositions ??
+    dhanPositions.filter((position) => Number(position.netQuantity ?? position.netQty ?? position.quantity ?? 0) !== 0);
+  const dhanBalance = dhanLiveTrading.balance ?? {};
+  const dhanSetupStrategyKey = DAILY_SETUP_KEYS.dhanNiftyFiveMinuteLive;
+  const dhanSelectedSetup =
+    strategyConfig.strategySetups?.[dhanSetupStrategyKey] ?? {};
+  const dhanSelectedForm =
+    contractForms[dhanSetupStrategyKey] ?? DEFAULT_DAILY_SETUP_FORM;
+  const dhanSetupSavedToday = Boolean(dhanSelectedSetup.usesDailySetup);
+  const dhanSetupSavedAt = dhanSelectedSetup.dailyContracts?.updated_at;
+  const dhanSetupEditorOpen =
+    setupEditorOpen[dhanSetupStrategyKey] ?? !dhanSetupSavedToday;
+  const dhanEnabledStrategyKeys = Array.isArray(
+    dhanLiveStatus.enabledStrategyKeys,
+  )
+    ? dhanLiveStatus.enabledStrategyKeys
+    : [];
+  const dhanSelectedStrategyEnabled =
+    Boolean(dhanLiveStatus.enabled) &&
+    dhanEnabledStrategyKeys.includes(dhanSetupStrategyKey);
+  const dhanSelectedSide =
+    dhanSelectedForm.contract1 === "PE" && dhanSelectedForm.contract2 === "CE"
+      ? "BOTH"
+      : dhanSelectedForm.contract1 === "CE"
+        ? "CE"
+        : "PE";
+  const dhanSelectedContracts = [
+    dhanSelectedSetup.effectiveContracts?.contract1,
+    dhanSelectedSetup.effectiveContracts?.contract2,
+  ]
+    .filter(Boolean)
+    .join(" / ");
   const livePositionRows = [
     ...(Array.isArray(livePositions.net) ? livePositions.net : []),
     ...(Array.isArray(livePositions.day) ? livePositions.day : []),
@@ -1128,20 +1656,27 @@ export function App() {
     (rawNiftyFiveMinuteActiveTrade ? [rawNiftyFiveMinuteActiveTrade] : []);
   const rawNiftyFiveMinuteTradeHistory =
     niftyFiveMinutePaperTrading.tradeHistory ?? [];
-  const rawSensexFiveMinuteActiveTrade =
-    sensexFiveMinutePaperTrading.activeTrade ?? null;
-  const rawSensexFiveMinuteActiveTrades =
-    sensexFiveMinutePaperTrading.activeTrades ??
-    (rawSensexFiveMinuteActiveTrade ? [rawSensexFiveMinuteActiveTrade] : []);
-  const rawSensexFiveMinuteTradeHistory =
-    sensexFiveMinutePaperTrading.tradeHistory ?? [];
+  const rawNiftyFiveMinuteV2ActiveTrade =
+    niftyFiveMinuteV2PaperTrading.activeTrade ?? null;
+  const rawNiftyFiveMinuteV2ActiveTrades =
+    niftyFiveMinuteV2PaperTrading.activeTrades ??
+    (rawNiftyFiveMinuteV2ActiveTrade ? [rawNiftyFiveMinuteV2ActiveTrade] : []);
+  const rawNiftyFiveMinuteV2TradeHistory =
+    niftyFiveMinuteV2PaperTrading.tradeHistory ?? [];
+  const rawDhanLiveActiveTrade = dhanLivePaperTrading.activeTrade ?? null;
+  const rawDhanLiveActiveTrades =
+    dhanLivePaperTrading.activeTrades ??
+    (rawDhanLiveActiveTrade ? [rawDhanLiveActiveTrade] : []);
+  const rawDhanLiveTradeHistory = dhanLivePaperTrading.tradeHistory ?? [];
   const activeTrades = [
     ...rawNiftyFiveMinuteActiveTrades,
-    ...rawSensexFiveMinuteActiveTrades,
+    ...rawNiftyFiveMinuteV2ActiveTrades,
+    ...rawDhanLiveActiveTrades,
   ];
   const tradeHistory = [
     ...rawNiftyFiveMinuteTradeHistory,
-    ...rawSensexFiveMinuteTradeHistory,
+    ...rawNiftyFiveMinuteV2TradeHistory,
+    ...rawDhanLiveTradeHistory,
   ].sort(
     (first, second) =>
       new Date(second.entry_time ?? second.entryTime ?? 0).getTime() -
@@ -1150,11 +1685,10 @@ export function App() {
   const dailySummary = paperTrading.dailySummary ?? {};
   const zerodha = data?.zerodha ?? {};
   const combinedCapitalBase =
-    Number(niftyPaperTrading.capitalBase ?? 0) +
-      Number(sensexPaperTrading.capitalBase ?? 0) +
-      Number(niftyFiveMinutePaperTrading.capitalBase ?? 0) +
-      Number(sensexFiveMinutePaperTrading.capitalBase ?? 0) ||
-    Number(paperTrading.capitalBase ?? 0);
+    Number(getPaperPnlBase(niftyFiveMinutePaperTrading) ?? 0) +
+      Number(getPaperPnlBase(niftyFiveMinuteV2PaperTrading) ?? 0) +
+      Number(getPaperPnlBase(dhanLivePaperTrading) ?? 0) ||
+    Number(getPaperPnlBase(paperTrading) ?? 0);
   const selectedRangeSummary = buildTradeSummaryForRange(
     tradeHistory,
     activeTrades,
@@ -1170,11 +1704,49 @@ export function App() {
     backtestTrades,
     "total",
   );
-  const optionBacktestTrades = optionBacktestResult?.trades ?? [];
   const niftyFiveMinuteBacktestTrades =
     niftyFiveMinuteBacktestResult?.trades ?? [];
   const niftyFiveMinuteBacktestSkipped =
     niftyFiveMinuteBacktestResult?.skipped ?? [];
+  const niftyFiveMinuteBacktestData = niftyFiveMinuteBacktestResult?.data ?? {};
+  const niftyFiveMinuteRawBuySignals = Number(
+    niftyFiveMinuteBacktestData.freshBuyArrowCount ??
+      niftyFiveMinuteBacktestData.rawBuySignalCount ??
+      0,
+  );
+  const niftyFiveMinuteAcceptedSignals = Number(
+    niftyFiveMinuteBacktestData.bodyAcceptedSignalCount ?? 0,
+  );
+  const niftyFiveMinuteExecutedTrades = Number(
+    niftyFiveMinuteBacktestData.executedTradeCount ??
+      niftyFiveMinuteBacktestResult?.summary?.tradeCount ??
+      0,
+  );
+  const niftyFiveMinuteBodyPassRate = niftyFiveMinuteRawBuySignals
+    ? (niftyFiveMinuteAcceptedSignals / niftyFiveMinuteRawBuySignals) * 100
+    : 0;
+  const niftyFiveMinuteTradeConversion = niftyFiveMinuteRawBuySignals
+    ? (niftyFiveMinuteExecutedTrades / niftyFiveMinuteRawBuySignals) * 100
+    : 0;
+  const niftyFiveMinuteTopSkipReason =
+    Object.entries(niftyFiveMinuteBacktestData.skippedReasonCounts ?? {})
+      .sort((first, second) => Number(second[1]) - Number(first[1]))
+      .at(0) ?? null;
+  const niftyFiveMinuteAdvancedFilters =
+    niftyFiveMinuteBacktestData.advancedFilters ?? {};
+  const niftyFiveMinuteActiveAdvancedFilters = [
+    niftyFiveMinuteAdvancedFilters.requireVwap ? "VWAP" : null,
+    Number(niftyFiveMinuteAdvancedFilters.minVolumeMultiplier) > 0
+      ? "Volume"
+      : null,
+    Number(niftyFiveMinuteAdvancedFilters.maxEntryGapPct) > 0
+      ? "Gap"
+      : null,
+    Number(niftyFiveMinuteAdvancedFilters.trailingStopPct) > 0
+      ? "Trail"
+      : null,
+    Number(niftyFiveMinuteAdvancedFilters.maxTradesPerDay) > 0 ? "Cap" : null,
+  ].filter(Boolean);
   const niftyFiveMinuteHourlyPnlReport = buildHourlyPnlReport(
     niftyFiveMinuteBacktestTrades,
     "total",
@@ -1183,14 +1755,45 @@ export function App() {
     niftyFiveMinuteBacktestTrades,
     "total",
   );
-  const optionContractStats = optionBacktestResult?.data?.contractStats ?? [];
-  const optionTypeStats = optionBacktestResult?.data?.optionTypeStats ?? [];
-  const optionBacktestHourlyPnlReport = buildHourlyPnlReport(
-    optionBacktestTrades,
+  const activeBacktestGroup =
+    backtestGroups.find((group) => group.id === activeBacktestGroupId) ?? null;
+  const selectedBacktestGroup =
+    backtestGroups.find((group) => group.id === selectedBacktestGroupId) ??
+    null;
+  const selectedBacktestGroupTradeIds = new Set(
+    (selectedBacktestGroup?.trades ?? []).map(
+      (trade) => trade.id ?? buildBacktestTradeId(trade),
+    ),
+  );
+  const allBacktestTradesAddedToSelectedGroup =
+    Boolean(selectedBacktestGroupId) &&
+    niftyFiveMinuteBacktestTrades.length > 0 &&
+    niftyFiveMinuteBacktestTrades.every((trade) =>
+      selectedBacktestGroupTradeIds.has(buildBacktestTradeId(trade)),
+    );
+  const activeBacktestGroupTrades = [
+    ...(activeBacktestGroup?.trades ?? []),
+  ].sort((first, second) => {
+    const firstDate =
+      parseIstDate(first.candleTime) ??
+      parseIstDate(first.entryTime) ??
+      parseIstDate(first.exitTime);
+    const secondDate =
+      parseIstDate(second.candleTime) ??
+      parseIstDate(second.entryTime) ??
+      parseIstDate(second.exitTime);
+    return (firstDate?.getTime() ?? 0) - (secondDate?.getTime() ?? 0);
+  });
+  const activeBacktestGroupMetrics = buildReportMetrics(
+    activeBacktestGroupTrades,
     "total",
   );
-  const optionBacktestWeekdayPnlReport = buildWeekdayPnlReport(
-    optionBacktestTrades,
+  const activeBacktestGroupHourlyReport = buildHourlyPnlReport(
+    activeBacktestGroupTrades,
+    "total",
+  );
+  const activeBacktestGroupWeekdayReport = buildWeekdayPnlReport(
+    activeBacktestGroupTrades,
     "total",
   );
   const isNiftyFiveMinuteLog = (log) =>
@@ -1199,21 +1802,27 @@ export function App() {
     (String(log?.interval ?? "").toLowerCase() === "5m" &&
       String(log?.underlying ?? "").toUpperCase() !== "SENSEX" &&
       String(log?.strategy_key ?? "").toLowerCase() !==
-        DAILY_SETUP_KEYS.sensexFiveMinuteBot);
-  const isSensexFiveMinuteLog = (log) =>
+        DAILY_SETUP_KEYS.niftyFiveMinuteBotV2);
+  const isNiftyFiveMinuteV2Log = (log) =>
     String(log?.strategy_key ?? "").toLowerCase() ===
-      DAILY_SETUP_KEYS.sensexFiveMinuteBot ||
-    (String(log?.interval ?? "").toLowerCase() === "5m" &&
-      String(log?.underlying ?? "").toUpperCase() === "SENSEX");
+    DAILY_SETUP_KEYS.niftyFiveMinuteBotV2;
+  const isDhanLiveLog = (log) =>
+    String(log?.strategy_key ?? "").toLowerCase() ===
+    DAILY_SETUP_KEYS.dhanNiftyFiveMinuteLive;
   const fiveMinuteLogs = logs.filter(
-    (log) => isNiftyFiveMinuteLog(log) || isSensexFiveMinuteLog(log),
+    (log) =>
+      isNiftyFiveMinuteLog(log) ||
+      isNiftyFiveMinuteV2Log(log) ||
+      isDhanLiveLog(log),
   );
   const filteredLogs =
     logStrategyFilter === "niftyFiveMinute"
       ? logs.filter(isNiftyFiveMinuteLog)
-      : logStrategyFilter === "sensexFiveMinute"
-        ? logs.filter(isSensexFiveMinuteLog)
-        : fiveMinuteLogs;
+      : logStrategyFilter === "niftyFiveMinuteV2"
+        ? logs.filter(isNiftyFiveMinuteV2Log)
+        : logStrategyFilter === "dhanLive"
+          ? logs.filter(isDhanLiveLog)
+          : fiveMinuteLogs;
   const selectedLogFilterMeta =
     STRATEGY_FILTER_OPTIONS.find((option) => option.id === logStrategyFilter) ??
     STRATEGY_FILTER_OPTIONS[0];
@@ -1275,10 +1884,8 @@ export function App() {
     logs,
     isNiftyFiveMinuteLog,
   );
-  const latestSensexTrendLog = getLatestTrendSnapshot(
-    logs,
-    isSensexFiveMinuteLog,
-  );
+  const latestDhanTrendLog = getLatestTrendSnapshot(logs, isDhanLiveLog);
+  const dhanLiveCachedCandle = logsMeta.dhanLiveCachedCandle ?? null;
   const combinedOpenTrade = activeTrades[0] ?? null;
   const openTradeLabel = combinedOpenTrade ? (
     <span className="open-trade-label">
@@ -1315,9 +1922,14 @@ export function App() {
   const isNiftyFiveMinuteOptionTrade = (trade) =>
     (trade?.strategy_key ?? trade?.strategyKey) ===
     DAILY_SETUP_KEYS.niftyFiveMinuteBot;
-  const isSensexFiveMinuteOptionTrade = (trade) =>
+  const isNiftyFiveMinuteV2OptionTrade = (trade) =>
     (trade?.strategy_key ?? trade?.strategyKey) ===
-    DAILY_SETUP_KEYS.sensexFiveMinuteBot;
+    DAILY_SETUP_KEYS.niftyFiveMinuteBotV2;
+  const isDhanLiveTrade = (trade) =>
+    (trade?.strategy_key ?? trade?.strategyKey) ===
+      DAILY_SETUP_KEYS.dhanNiftyFiveMinuteLive ||
+    String(trade?.live_broker ?? trade?.liveBroker ?? "").toLowerCase() ===
+      "dhan";
   const oneMinuteOptionTrades = tradeHistory.filter(isNiftyOptionTrade);
   const oneMinuteActiveTrades = niftyActiveTrades.filter(isNiftyOptionTrade);
   const sensexTradeHistory = rawSensexTradeHistory;
@@ -1332,17 +1944,18 @@ export function App() {
   const niftyFiveMinuteActiveTrades = rawNiftyFiveMinuteActiveTrades.filter(
     isNiftyFiveMinuteOptionTrade,
   );
-  const sensexFiveMinuteOptionTrades = rawSensexFiveMinuteTradeHistory.filter(
-    isSensexFiveMinuteOptionTrade,
-  );
-  const sensexFiveMinuteActiveTrades = rawSensexFiveMinuteActiveTrades.filter(
-    isSensexFiveMinuteOptionTrade,
-  );
+  const niftyFiveMinuteV2OptionTrades =
+    rawNiftyFiveMinuteV2TradeHistory.filter(isNiftyFiveMinuteV2OptionTrade);
+  const niftyFiveMinuteV2ActiveTrades =
+    rawNiftyFiveMinuteV2ActiveTrades.filter(isNiftyFiveMinuteV2OptionTrade);
+  const dhanLiveOptionTrades = rawDhanLiveTradeHistory.filter(isDhanLiveTrade);
+  const dhanLiveActiveTrades = rawDhanLiveActiveTrades.filter(isDhanLiveTrade);
   const filterTradesByStrategy = (filterId) => {
     if (filterId === "niftyOneMinute") return oneMinuteOptionTrades;
     if (filterId === "sensexOneMinute") return sensexOneMinuteOptionTrades;
     if (filterId === "niftyFiveMinute") return niftyFiveMinuteOptionTrades;
-    if (filterId === "sensexFiveMinute") return sensexFiveMinuteOptionTrades;
+    if (filterId === "niftyFiveMinuteV2") return niftyFiveMinuteV2OptionTrades;
+    if (filterId === "dhanLive") return dhanLiveOptionTrades;
     return tradeHistory;
   };
   const filteredTradeHistory = filterTradesByStrategy(tradeStrategyFilter);
@@ -1405,13 +2018,13 @@ export function App() {
     niftyFiveMinuteOptionTrades,
     niftyFiveMinuteActiveTrades,
   );
-  const sensexFiveMinuteBotSummary = buildBotPageSummary(
-    sensexFiveMinuteOptionTrades,
-    sensexFiveMinuteActiveTrades,
+  const niftyFiveMinuteV2BotSummary = buildBotPageSummary(
+    niftyFiveMinuteV2OptionTrades,
+    niftyFiveMinuteV2ActiveTrades,
   );
   const overviewBotCards = [
     {
-      label: "NIFTY 5m",
+      label: "NIFTY 5m V1",
       strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBot,
       paperTrading: niftyFiveMinutePaperTrading,
       activeTrades: niftyFiveMinuteActiveTrades,
@@ -1422,20 +2035,21 @@ export function App() {
         {},
     },
     {
-      label: "SENSEX 5m",
-      strategyKey: DAILY_SETUP_KEYS.sensexFiveMinuteBot,
-      paperTrading: sensexFiveMinutePaperTrading,
-      activeTrades: sensexFiveMinuteActiveTrades,
-      summary: sensexFiveMinuteBotSummary,
-      trendLog: latestSensexTrendLog,
+      label: "NIFTY 5m V2",
+      strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBotV2,
+      paperTrading: niftyFiveMinuteV2PaperTrading,
+      activeTrades: niftyFiveMinuteV2ActiveTrades,
+      summary: niftyFiveMinuteV2BotSummary,
+      trendLog: latestNiftyTrendLog,
       setup:
-        strategyConfig.strategySetups?.[DAILY_SETUP_KEYS.sensexFiveMinuteBot] ??
-        {},
+        strategyConfig.strategySetups?.[
+          DAILY_SETUP_KEYS.niftyFiveMinuteBotV2
+        ] ?? {},
     },
   ];
   const balanceCards = [
     {
-      label: "NIFTY Bank Balance",
+      label: "NIFTY 5m V1 Bank Balance",
       shortLabel: "N",
       strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBot,
       paperTrading: niftyFiveMinutePaperTrading,
@@ -1443,12 +2057,12 @@ export function App() {
       summary: niftyFiveMinuteBotSummary,
     },
     {
-      label: "SENSEX Bank Balance",
-      shortLabel: "S",
-      strategyKey: DAILY_SETUP_KEYS.sensexFiveMinuteBot,
-      paperTrading: sensexFiveMinutePaperTrading,
-      activeTrades: sensexFiveMinuteActiveTrades,
-      summary: sensexFiveMinuteBotSummary,
+      label: "NIFTY 5m V2 Bank Balance",
+      shortLabel: "V2",
+      strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBotV2,
+      paperTrading: niftyFiveMinuteV2PaperTrading,
+      activeTrades: niftyFiveMinuteV2ActiveTrades,
+      summary: niftyFiveMinuteV2BotSummary,
     },
   ];
   const signalAlertColumns = [
@@ -1532,36 +2146,6 @@ export function App() {
     { id: "exitReason", label: "Exit Reason" },
     { id: "executionSource", label: "Source" },
   ];
-  const optionBacktestTradeColumns = [
-    { id: "signal", label: "Signal" },
-    { id: "entryTime", label: "Entry" },
-    { id: "exitTime", label: "Exit" },
-    { id: "optionSymbol", label: "Contract" },
-    { id: "quantity", label: "Qty" },
-    { id: "entryPrice", label: "Exec Entry" },
-    { id: "exitPrice", label: "Exec Exit" },
-    { id: "stopLoss", label: "SL" },
-    { id: "target", label: "Target" },
-    { id: "netPnl", label: "Net PnL" },
-    { id: "status", label: "Status" },
-    { id: "exitReason", label: "Exit Reason" },
-  ];
-  const optionContractStatsColumns = [
-    { id: "optionSymbol", label: "Contract" },
-    { id: "selectedSignals", label: "Signals" },
-    { id: "fastBoth", label: "Fast / Both" },
-    { id: "trades", label: "Trades" },
-    { id: "skipped", label: "Skipped" },
-    { id: "netPnl", label: "Net PnL" },
-  ];
-  const optionTypeStatsColumns = [
-    { id: "optionType", label: "Type" },
-    { id: "trades", label: "Trades" },
-    { id: "winsLosses", label: "Wins / Losses" },
-    { id: "winRate", label: "Win Rate" },
-    { id: "netPnl", label: "Net PnL" },
-  ];
-
   const [selectedSignalAlertColumns, setSelectedSignalAlertColumns] = useState(
     () => loadSelectedColumns("signal-alerts", signalAlertColumns),
   );
@@ -1576,22 +2160,6 @@ export function App() {
   const [selectedBacktestTradeColumns, setSelectedBacktestTradeColumns] =
     useState(() =>
       loadSelectedColumns("backtest-trades", backtestTradeColumns),
-    );
-  const [
-    selectedOptionBacktestTradeColumns,
-    setSelectedOptionBacktestTradeColumns,
-  ] = useState(() =>
-    loadSelectedColumns("option-backtest-trades", optionBacktestTradeColumns),
-  );
-  const [
-    selectedOptionContractStatsColumns,
-    setSelectedOptionContractStatsColumns,
-  ] = useState(() =>
-    loadSelectedColumns("option-contract-stats", optionContractStatsColumns),
-  );
-  const [selectedOptionTypeStatsColumns, setSelectedOptionTypeStatsColumns] =
-    useState(() =>
-      loadSelectedColumns("option-type-stats", optionTypeStatsColumns),
     );
   const [tablePages, setTablePages] = useState({});
   const [tablePageSizes, setTablePageSizes] = useState({});
@@ -1630,27 +2198,6 @@ export function App() {
       JSON.stringify(selectedBacktestTradeColumns),
     );
   }, [selectedBacktestTradeColumns]);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      `${TABLE_COLUMN_STORAGE_PREFIX}option-backtest-trades`,
-      JSON.stringify(selectedOptionBacktestTradeColumns),
-    );
-  }, [selectedOptionBacktestTradeColumns]);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      `${TABLE_COLUMN_STORAGE_PREFIX}option-contract-stats`,
-      JSON.stringify(selectedOptionContractStatsColumns),
-    );
-  }, [selectedOptionContractStatsColumns]);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      `${TABLE_COLUMN_STORAGE_PREFIX}option-type-stats`,
-      JSON.stringify(selectedOptionTypeStatsColumns),
-    );
-  }, [selectedOptionTypeStatsColumns]);
 
   function toggleColumn(columnId, selected, setSelected, columns) {
     setSelected((current) => {
@@ -1716,6 +2263,15 @@ export function App() {
     return "neutral";
   }
 
+  function getRunLogBodyTone(item) {
+    const open = Number(item?.open);
+    const close = Number(item?.close);
+    if (!Number.isFinite(open) || !Number.isFinite(close) || open === close) {
+      return "neutral";
+    }
+    return close > open ? "good" : "bad";
+  }
+
   function isRunLogColumnVisible(columnId) {
     return selectedRunLogColumns.includes(columnId);
   }
@@ -1731,11 +2287,19 @@ export function App() {
         resolved_symbol: optionSymbol,
         status: log.status,
         signal: log.signal,
+        open: log.open,
+        high: log.high,
+        low: log.low,
         close: log.close,
         st_10_1: log.st_10_1,
         st_10_3: log.st_10_3,
         st_10_1_trend: log.st_10_1_trend,
         st_10_3_trend: log.st_10_3_trend,
+        strike: log.strike,
+        strike_offset: log.strike_offset,
+        expiry: log.expiry,
+        signal_candle_body_pct: log.signal_candle_body_pct,
+        signal_candle_range_pct: log.signal_candle_range_pct,
         candle_time: log.candle_time,
       },
     ];
@@ -1758,15 +2322,6 @@ export function App() {
   const visibleBacktestTradeColumns = backtestTradeColumns.filter((column) =>
     selectedBacktestTradeColumns.includes(column.id),
   );
-  const visibleOptionBacktestTradeColumns = optionBacktestTradeColumns.filter(
-    (column) => selectedOptionBacktestTradeColumns.includes(column.id),
-  );
-  const visibleOptionContractStatsColumns = optionContractStatsColumns.filter(
-    (column) => selectedOptionContractStatsColumns.includes(column.id),
-  );
-  const visibleOptionTypeStatsColumns = optionTypeStatsColumns.filter(
-    (column) => selectedOptionTypeStatsColumns.includes(column.id),
-  );
   const overviewAlertsTable = paginateRows("overview-alerts", recentAlerts);
   const signalsTable = paginateRows("signal-alerts", recentAlerts);
   const overviewTradeHistoryTable = paginateRows(
@@ -1776,17 +2331,9 @@ export function App() {
   const tradeHistoryTable = paginateRows("trade-history", filteredTradeHistory);
   const liveOrdersTable = paginateRows("live-orders", liveOrders);
   const backtestTradesTable = paginateRows("backtest-trades", backtestTrades);
-  const optionBacktestTradesTable = paginateRows(
-    "option-backtest-trades",
-    optionBacktestTrades,
-  );
-  const optionContractStatsTable = paginateRows(
-    "option-contract-stats",
-    optionContractStats,
-  );
-  const optionTypeStatsTable = paginateRows(
-    "option-type-stats",
-    optionTypeStats,
+  const backtestGroupTradesTable = paginateRows(
+    "backtest-group-trades",
+    activeBacktestGroupTrades,
   );
   const runLogsTable = paginateRows("run-logs", filteredLogs);
   const activeNavOption =
@@ -1815,12 +2362,88 @@ export function App() {
     window.location.href = zerodha.loginUrl;
   }
 
+  async function runOptionCandleStorage(instrument = "ALL") {
+    setCandleStorageBusy(true);
+    setCandleStorageResult(null);
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await fetch(apiUrl("/api/option-candles/store"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ instrument }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          payload.detail ?? `Option candle storage failed with ${response.status}`,
+        );
+      }
+      setCandleStorageResult(payload);
+      setActionMessage(payload.message ?? "Option candle storage completed.");
+    } catch (storageError) {
+      setError(
+        storageError instanceof Error
+          ? storageError.message
+          : "Unable to store option candles.",
+      );
+    } finally {
+      setCandleStorageBusy(false);
+    }
+  }
+
+  async function cacheDhanInstrumentMaster(force = false) {
+    setDhanMasterBusy(true);
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await fetch(apiUrl("/api/dhan/instrument-master/cache"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ force }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          payload.detail ??
+            `Dhan instrument master cache failed with ${response.status}`,
+        );
+      }
+      setDhanMasterResult(payload);
+      setData((current) => ({
+        ...(current ?? {}),
+        dhanLiveTrading: {
+          ...((current ?? {}).dhanLiveTrading ?? {}),
+          instrumentMaster: payload,
+        },
+      }));
+      setActionMessage(
+        payload.downloaded
+          ? "Dhan instrument master downloaded and cached for today."
+          : "Dhan instrument master is already cached for today.",
+      );
+    } catch (cacheError) {
+      setError(
+        cacheError instanceof Error
+          ? cacheError.message
+          : "Unable to cache Dhan instrument master.",
+      );
+    } finally {
+      setDhanMasterBusy(false);
+    }
+  }
+
   async function refreshDashboardData() {
     const response = await fetch(apiUrl("/api/dashboard"));
     if (!response.ok) {
       throw new Error(`Dashboard refresh failed with ${response.status}`);
     }
-    setData(await response.json());
+    const payload = await response.json();
+    setData((current) => mergeDashboardPayload(current, payload));
   }
 
   async function refreshLiveTradingData() {
@@ -1833,6 +2456,50 @@ export function App() {
       ...(current ?? {}),
       liveTrading: livePayload,
     }));
+  }
+
+  async function refreshDhanLiveTradingData({
+    positionsOnly = false,
+    silent = false,
+  } = {}) {
+    if (!silent) {
+      setLiveActionBusy("dhan-refresh");
+      setError("");
+    }
+    try {
+      const response = await fetch(
+        apiUrl(
+          `/api/dhan-live-trading${positionsOnly ? "?positionsOnly=true" : ""}`,
+        ),
+      );
+      if (!response.ok) {
+        throw new Error(`Dhan live refresh failed with ${response.status}`);
+      }
+      const dhanPayload = await response.json();
+      setData((current) =>
+        positionsOnly
+          ? mergeDhanLiveTradingPayload(current, dhanPayload, {
+              preserveBalance: true,
+              preserveHistory: true,
+            })
+          : {
+              ...(current ?? {}),
+              dhanLiveTrading: dhanPayload,
+            },
+      );
+    } catch (refreshError) {
+      if (!silent) {
+        setError(
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Unable to refresh Dhan live trading.",
+        );
+      }
+    } finally {
+      if (!silent) {
+        setLiveActionBusy("");
+      }
+    }
   }
 
   async function toggleLiveTrading(enabled) {
@@ -1861,12 +2528,175 @@ export function App() {
         enabled ? "Live trading enabled." : "Live trading disabled.",
       );
       setLiveTradingConfirmOpen(false);
-      await refreshLiveTradingData();
+      const payload = await response.json().catch(() => ({}));
+      setData((current) => ({
+        ...(current ?? {}),
+        liveTrading: {
+          ...((current ?? {}).liveTrading ?? {}),
+          status: payload.status ?? {},
+        },
+      }));
     } catch (liveError) {
       setError(
         liveError instanceof Error
           ? liveError.message
           : "Unable to update live trading.",
+      );
+    } finally {
+      setLiveActionBusy("");
+    }
+  }
+
+  async function toggleDhanLiveTrading(enabled) {
+    setLiveActionBusy("dhan-toggle");
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await fetch(apiUrl("/api/dhan-live-trading/toggle"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled,
+          enabledStrategyKeys: enabled
+            ? [dhanSetupStrategyKey]
+            : dhanEnabledStrategyKeys,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(
+          payload.detail ?? `Dhan live toggle failed with ${response.status}`,
+        );
+      }
+      setActionMessage(
+        enabled ? "Dhan live trading enabled." : "Dhan live trading disabled.",
+      );
+      const payload = await response.json().catch(() => ({}));
+      setData((current) => ({
+        ...(current ?? {}),
+        dhanLiveTrading: {
+          ...((current ?? {}).dhanLiveTrading ?? {}),
+          status: payload.status ?? {},
+        },
+      }));
+    } catch (liveError) {
+      setError(
+        liveError instanceof Error
+          ? liveError.message
+          : "Unable to update Dhan live trading.",
+      );
+    } finally {
+      setLiveActionBusy("");
+    }
+  }
+
+  function updateDhanManualEntryField(field, value) {
+    setDhanManualEntryForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
+  async function placeDhanManualEntry(event) {
+    event.preventDefault();
+    const strike = Number(dhanManualEntryForm.strike);
+    const quantity = Number(dhanManualEntryForm.quantity);
+    if (!Number.isFinite(strike) || strike <= 0) {
+      setError("Enter a valid NIFTY option strike for Dhan manual entry.");
+      return;
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      setError("Enter a valid quantity for Dhan manual entry.");
+      return;
+    }
+    if (quantity % DHAN_NIFTY_LOT_SIZE !== 0) {
+      setError(`Enter quantity in NIFTY lot multiples of ${DHAN_NIFTY_LOT_SIZE}.`);
+      return;
+    }
+    const confirmed = window.confirm(
+      `Place REAL Dhan ${dhanManualEntryForm.transactionType} order for NIFTY ${strike} ${dhanManualEntryForm.optionType}, Qty ${quantity}?`,
+    );
+    if (!confirmed) return;
+
+    setLiveActionBusy("dhan-manual-entry");
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await fetch(apiUrl("/api/dhan-live-trading/manual-entry"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transactionType: dhanManualEntryForm.transactionType,
+          optionType: dhanManualEntryForm.optionType,
+          strike,
+          quantity,
+          expiry: dhanManualEntryForm.expiry || null,
+          productType: "INTRADAY",
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(
+          payload.detail ?? `Dhan manual entry failed with ${response.status}`,
+        );
+      }
+      const payload = await response.json().catch(() => ({}));
+      const symbol =
+        payload.security?.tradingSymbol ??
+        `NIFTY ${strike} ${dhanManualEntryForm.optionType}`;
+      setActionMessage(`Dhan manual ${dhanManualEntryForm.transactionType} placed for ${symbol}.`);
+      await refreshDhanLiveTradingData();
+    } catch (liveError) {
+      setError(
+        liveError instanceof Error
+          ? liveError.message
+          : "Unable to place Dhan manual entry.",
+      );
+    } finally {
+      setLiveActionBusy("");
+    }
+  }
+
+  async function exitDhanPosition(position) {
+    const tradingSymbol =
+      position.tradingSymbol ?? position.tradingsymbol ?? position.symbol;
+    const securityId = position.securityId ?? position.security_id;
+    const quantity = Number(
+      position.netQuantity ?? position.netQty ?? position.quantity ?? 0,
+    );
+    if (!securityId || !tradingSymbol || !quantity) {
+      setError("Dhan position is missing symbol, security id, or quantity.");
+      return;
+    }
+    setLiveActionBusy(`dhan-exit-${securityId}`);
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await fetch(apiUrl("/api/dhan-live-trading/positions/exit"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          securityId: String(securityId),
+          tradingSymbol: String(tradingSymbol),
+          exchangeSegment:
+            position.exchangeSegment ?? position.exchange_segment ?? "NSE_FNO",
+          productType: position.productType ?? position.product ?? "INTRADAY",
+          quantity,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(
+          payload.detail ?? `Dhan exit failed with ${response.status}`,
+        );
+      }
+      setActionMessage(`Dhan manual exit placed for ${tradingSymbol}.`);
+      await refreshDhanLiveTradingData();
+    } catch (liveError) {
+      setError(
+        liveError instanceof Error
+          ? liveError.message
+          : "Unable to exit Dhan position.",
       );
     } finally {
       setLiveActionBusy("");
@@ -1923,6 +2753,7 @@ export function App() {
       data?.strategyConfig?.strategySetups?.[strategyKey] ?? {};
     const setupLabel = setupConfig.label ?? "1m option bot";
     const isFiveMinuteSetup = setupLabel.includes("5m");
+    const isV2Setup = strategyKey === DAILY_SETUP_KEYS.niftyFiveMinuteBotV2;
     const intervalLabel = isFiveMinuteSetup ? "5m" : "1m";
     const addMoneyAmount = addMoneyAmounts[strategyKey] ?? "";
     const setupTitle = showContracts
@@ -1997,7 +2828,7 @@ export function App() {
               <strong>
                 <PnlValue
                   value={summary.runningPnl}
-                  baseValue={botPaperTrading.capitalBase}
+                  baseValue={getPaperPnlBase(botPaperTrading)}
                 />
               </strong>
             </div>
@@ -2015,7 +2846,7 @@ export function App() {
                 <dd>
                   <PnlValue
                     value={summary.realizedPnl}
-                    baseValue={botPaperTrading.capitalBase}
+                    baseValue={getPaperPnlBase(botPaperTrading)}
                   />
                 </dd>
               </div>
@@ -2024,7 +2855,7 @@ export function App() {
                 <dd>
                   <PnlValue
                     value={summary.unrealizedPnl}
-                    baseValue={botPaperTrading.capitalBase}
+                    baseValue={getPaperPnlBase(botPaperTrading)}
                   />
                 </dd>
               </div>
@@ -2372,8 +3203,7 @@ export function App() {
                     <input
                       type="number"
                       step={
-                        strategyKey === DAILY_SETUP_KEYS.sensexOneMinuteBot ||
-                        strategyKey === DAILY_SETUP_KEYS.sensexFiveMinuteBot
+                        strategyKey === DAILY_SETUP_KEYS.sensexOneMinuteBot
                           ? "100"
                           : "50"
                       }
@@ -2387,6 +3217,25 @@ export function App() {
                         )
                       }
                     />
+                  </label>
+                  <label className="form-field">
+                    Expiry
+                    <select
+                      value={setupForm.expiryOffset}
+                      onChange={(event) =>
+                        updateContractField(
+                          strategyKey,
+                          "expiryOffset",
+                          event.target.value,
+                        )
+                      }
+                    >
+                      {EXPIRY_OFFSET_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="form-field">
                     SL Mode
@@ -2420,6 +3269,109 @@ export function App() {
                       }
                     />
                   </label>
+                  {isV2Setup ? (
+                    <details className="advanced-backtest-fields" open>
+                      <summary>V2 advanced filters</summary>
+                      <label className="toggle-control">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(setupForm.requireVwap)}
+                          onChange={(event) =>
+                            updateContractField(
+                              strategyKey,
+                              "requireVwap",
+                              event.target.checked,
+                            )
+                          }
+                        />
+                        <span>Close below VWAP</span>
+                      </label>
+                      <label className="form-field">
+                        Volume Multiplier
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={setupForm.minVolumeMultiplier}
+                          placeholder="0 disables"
+                          onChange={(event) =>
+                            updateContractField(
+                              strategyKey,
+                              "minVolumeMultiplier",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="form-field">
+                        Volume Lookback
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={setupForm.volumeLookback}
+                          onChange={(event) =>
+                            updateContractField(
+                              strategyKey,
+                              "volumeLookback",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="form-field">
+                        Max Entry Gap %
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={setupForm.maxEntryGapPct}
+                          placeholder="0 disables"
+                          onChange={(event) =>
+                            updateContractField(
+                              strategyKey,
+                              "maxEntryGapPct",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="form-field">
+                        Trailing SL %
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={setupForm.trailingStopPct}
+                          placeholder="0 disables"
+                          onChange={(event) =>
+                            updateContractField(
+                              strategyKey,
+                              "trailingStopPct",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="form-field">
+                        Max Trades / Day
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={setupForm.maxTradesPerDay}
+                          placeholder="0 disables"
+                          onChange={(event) =>
+                            updateContractField(
+                              strategyKey,
+                              "maxTradesPerDay",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                    </details>
+                  ) : null}
                 </>
               ) : null}
               <button
@@ -2498,6 +3450,41 @@ export function App() {
               <div>
                 <dt>Strike Offset</dt>
                 <dd>{setupConfig.strikeOffset ?? 0}</dd>
+              </div>
+            ) : null}
+            {showContracts ? (
+              <div>
+                <dt>Expiry</dt>
+                <dd>
+                  {EXPIRY_OFFSET_OPTIONS.find(
+                    (option) =>
+                      option.id === String(setupConfig.expiryOffset ?? "0"),
+                  )?.label ?? "Nearest expiry"}
+                </dd>
+              </div>
+            ) : null}
+            {isV2Setup ? (
+              <div>
+                <dt>Advanced Filters</dt>
+                <dd>
+                  {[
+                    setupConfig.requireVwap ? "VWAP" : null,
+                    Number(setupConfig.minVolumeMultiplier) > 0
+                      ? `Vol ${setupConfig.minVolumeMultiplier}x`
+                      : null,
+                    Number(setupConfig.maxEntryGapPct) > 0
+                      ? `Gap ${setupConfig.maxEntryGapPct}%`
+                      : null,
+                    Number(setupConfig.trailingStopPct) > 0
+                      ? `Trail ${setupConfig.trailingStopPct}%`
+                      : null,
+                    Number(setupConfig.maxTradesPerDay) > 0
+                      ? `Cap ${setupConfig.maxTradesPerDay}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" / ") || "Off"}
+                </dd>
               </div>
             ) : null}
             <div>
@@ -2610,7 +3597,7 @@ export function App() {
               : activeView === "niftyOneMinuteBot" ||
                   activeView === "sensexOneMinuteBot" ||
                   activeView === "niftyFiveMinuteBot" ||
-                  activeView === "sensexFiveMinuteBot"
+                  activeView === "niftyFiveMinuteBotV2"
                 ? "Bot"
                 : activeView === "trades"
                   ? "History"
@@ -2618,6 +3605,8 @@ export function App() {
                     ? "Alerts"
                     : activeView === "reports"
                       ? "Report range"
+                      : activeView === "backtestGroups"
+                        ? "Saved set"
                       : activeView === "broker"
                         ? "Zerodha"
                         : activeView === "liveTrading"
@@ -2628,15 +3617,17 @@ export function App() {
             {activeView === "overview"
               ? streamStatus
               : activeView === "niftyFiveMinuteBot"
-                ? "NIFTY 5m"
-                : activeView === "sensexFiveMinuteBot"
-                  ? "SENSEX 5m"
+                ? "NIFTY 5m V1"
+                : activeView === "niftyFiveMinuteBotV2"
+                  ? "NIFTY 5m V2"
                   : activeView === "trades"
                     ? `${formatCount(tradeHistory.length)} trades`
                     : activeView === "signals"
                       ? `${formatCount(recentAlerts.length)} alerts`
                       : activeView === "reports"
                         ? selectedRangeMeta.label
+                        : activeView === "backtestGroups"
+                          ? `${formatCount(activeBacktestGroupTrades.length)} trades`
                         : activeView === "broker"
                           ? zerodha.health?.ok
                             ? "Working"
@@ -2645,9 +3636,7 @@ export function App() {
                             ? liveTradingStatus.enabled
                               ? "Enabled"
                               : "Disabled"
-                            : activeView === "optionBacktest"
-                              ? "Manual contract"
-                              : selectedDate}
+                            : selectedDate}
           </strong>
         </div>
       </section>
@@ -2829,6 +3818,15 @@ export function App() {
               <div>
                 <dt>Offset</dt>
                 <dd>{liveSelectedForm.strikeOffset || "0"}</dd>
+              </div>
+              <div>
+                <dt>Expiry</dt>
+                <dd>
+                  {EXPIRY_OFFSET_OPTIONS.find(
+                    (option) =>
+                      option.id === String(liveSelectedForm.expiryOffset ?? "0"),
+                  )?.label ?? "Nearest expiry"}
+                </dd>
               </div>
               <div>
                 <dt>Broker Cash</dt>
@@ -3024,7 +4022,7 @@ export function App() {
                         <strong>
                           <PnlValue
                             value={bot.summary.runningPnl}
-                            baseValue={bot.paperTrading.capitalBase}
+                            baseValue={getPaperPnlBase(bot.paperTrading)}
                           />
                         </strong>
                         <small>
@@ -3048,7 +4046,7 @@ export function App() {
                           <dd>
                               <PnlValue
                                 value={bot.summary.realizedPnl}
-                                baseValue={bot.paperTrading.capitalBase}
+                                baseValue={getPaperPnlBase(bot.paperTrading)}
                               />
                           </dd>
                         </div>
@@ -3474,8 +4472,8 @@ export function App() {
         })
       ) : activeView === "niftyFiveMinuteBot" ? (
         renderBotPage({
-          eyebrow: "NIFTY 5-Minute Option Bot",
-          title: "NIFTY 5m option-contract execution",
+          eyebrow: "NIFTY 5-Minute Option Bot V1",
+          title: "NIFTY 5m V1 option-contract execution",
           subtitle:
             "BUY-only Supertrend strategy matching the 5m backtest, with entry at next candle +2s.",
           scheduleLabel: "Every 5 min at +2s",
@@ -3486,19 +4484,19 @@ export function App() {
           showContracts: true,
           botPaperTrading: niftyFiveMinutePaperTrading,
         })
-      ) : activeView === "sensexFiveMinuteBot" ? (
+      ) : activeView === "niftyFiveMinuteBotV2" ? (
         renderBotPage({
-          eyebrow: "SENSEX 5-Minute Option Bot",
-          title: "SENSEX 5m option-contract execution",
+          eyebrow: "NIFTY 5-Minute Option Bot V2",
+          title: "NIFTY 5m V2 advanced-filter execution",
           subtitle:
-            "Separate SENSEX lane for the same BUY-only 5m Supertrend strategy.",
+            "Separate NIFTY 5m lane with VWAP, volume, entry-gap, trailing stop, and trade-cap filters.",
           scheduleLabel: "Every 5 min at +2s",
-          strategyKey: DAILY_SETUP_KEYS.sensexFiveMinuteBot,
-          trades: sensexFiveMinuteOptionTrades,
-          currentActiveTrades: sensexFiveMinuteActiveTrades,
-          summary: sensexFiveMinuteBotSummary,
+          strategyKey: DAILY_SETUP_KEYS.niftyFiveMinuteBotV2,
+          trades: niftyFiveMinuteV2OptionTrades,
+          currentActiveTrades: niftyFiveMinuteV2ActiveTrades,
+          summary: niftyFiveMinuteV2BotSummary,
           showContracts: true,
-          botPaperTrading: sensexFiveMinutePaperTrading,
+          botPaperTrading: niftyFiveMinuteV2PaperTrading,
         })
       ) : activeView === "balance" ? (
         <section className="section-block">
@@ -3556,7 +4554,7 @@ export function App() {
                         <dd>
                           <PnlValue
                             value={card.summary.runningPnl}
-                            baseValue={card.paperTrading.capitalBase}
+                            baseValue={getPaperPnlBase(card.paperTrading)}
                           />
                         </dd>
                       </div>
@@ -3565,7 +4563,7 @@ export function App() {
                         <dd>
                           <PnlValue
                             value={card.summary.realizedPnl}
-                            baseValue={card.paperTrading.capitalBase}
+                            baseValue={getPaperPnlBase(card.paperTrading)}
                           />
                         </dd>
                       </div>
@@ -3574,7 +4572,7 @@ export function App() {
                         <dd>
                           <PnlValue
                             value={card.summary.unrealizedPnl}
-                            baseValue={card.paperTrading.capitalBase}
+                            baseValue={getPaperPnlBase(card.paperTrading)}
                           />
                         </dd>
                       </div>
@@ -4196,6 +5194,25 @@ export function App() {
                 />
               </label>
               <label className="form-field">
+                Expiry
+                <select
+                  value={liveSelectedForm.expiryOffset}
+                  onChange={(event) =>
+                    updateContractField(
+                      liveSetupStrategyKey,
+                      "expiryOffset",
+                      event.target.value,
+                    )
+                  }
+                >
+                  {EXPIRY_OFFSET_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="form-field">
                 SL Mode
                 <select
                   value={liveSelectedForm.stopLossMode}
@@ -4480,11 +5497,645 @@ export function App() {
             </article>
           </section>
         </section>
+      ) : activeView === "dhanLiveTrading" ? (
+        <section className="section-block">
+          <div className="section-heading">
+            <p className="eyebrow">Dhan Live</p>
+            <h2 className="section-title">Dhan NIFTY 5m execution</h2>
+          </div>
+
+          <section className="panel bot-command-card live-command-card">
+            <div className="bot-command-card__top">
+              <div>
+                <p className="eyebrow">Broker execution</p>
+                <h2>Dhan NIFTY 5m Bot</h2>
+              </div>
+              <span
+                className={`setup-status__pill ${
+                  dhanSelectedStrategyEnabled ? "setup-status__pill--saved" : ""
+                }`}
+              >
+                {dhanSelectedStrategyEnabled ? "Live On" : "Live Off"}
+              </span>
+            </div>
+
+            <div className="bot-command-card__main">
+              <div className="bot-command-card__pnl">
+                <span>Available Cash</span>
+                <strong>
+                  {dhanBalance.cash == null
+                    ? "Not available"
+                    : formatCurrency(dhanBalance.cash)}
+                </strong>
+                <small>
+                  Withdrawable:{" "}
+                  {dhanBalance.withdrawableBalance == null
+                    ? "Not available"
+                    : formatCurrency(dhanBalance.withdrawableBalance)}
+                </small>
+              </div>
+
+              <dl className="bot-command-card__stats live-command-card__stats">
+                <div>
+                  <dt>Active Positions</dt>
+                  <dd>{formatCount(dhanActivePositions.length)}</dd>
+                </div>
+                <div>
+                  <dt>Dhan</dt>
+                  <dd>{dhanLiveStatus.dhanReady ? "Ready" : "Not ready"}</dd>
+                </div>
+                <div>
+                  <dt>Orders / Trades</dt>
+                  <dd>
+                    {formatCount(dhanOrders.length)} /{" "}
+                    {formatCount(dhanTrades.length)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Contracts</dt>
+                  <dd>{dhanSelectedContracts || "Not set"}</dd>
+                </div>
+                <div>
+                  <dt>Target / SL</dt>
+                  <dd>
+                    {dhanSelectedSetup.targetPct ??
+                      dhanSelectedForm.targetPct ??
+                      "-"}
+                    % /{" "}
+                    {formatSnakeLabel(
+                      dhanSelectedSetup.stopLossMode ??
+                        dhanSelectedForm.stopLossMode ??
+                        "signal_low",
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Last Action</dt>
+                  <dd>
+                    {formatSnakeLabel(dhanLiveStatus.lastAction ?? "none")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Broker Error</dt>
+                  <dd>{dhanLiveTrading.error ?? "None"}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div
+              className={`setup-status ${dhanSetupSavedToday ? "setup-status--saved" : "setup-status--missing"}`}
+            >
+              <div>
+                <p className="setup-status__title">
+                  {dhanSetupSavedToday
+                    ? `Today's Dhan setup is saved`
+                    : "Today's Dhan setup is not set"}
+                </p>
+                <p className="setup-status__copy">
+                  {dhanSetupSavedToday
+                    ? `Saved for ${dhanSelectedSetup.date ?? "today"}. Edit only when you want to change today's live setup.`
+                    : "Dhan live trading will stay off until you save today's setup."}
+                </p>
+              </div>
+              <span className="setup-status__pill">
+                {dhanSetupSavedToday ? "Saved" : "Not set"}
+              </span>
+            </div>
+
+            <dl className="bot-command-card__stats live-command-card__stats dhan-setup-summary">
+              <div>
+                <dt>Saved At</dt>
+                <dd>{formatDateTime(dhanSetupSavedAt)}</dd>
+              </div>
+              <div>
+                <dt>Option Side</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? dhanSelectedContracts || "Not set"
+                    : "Not set"}
+                </dd>
+              </div>
+              <div>
+                <dt>Window</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? `${dhanSelectedSetup.scheduleStart ?? "-"} - ${
+                        dhanSelectedSetup.scheduleEnd ?? "-"
+                      }`
+                    : "Not set"}
+                </dd>
+              </div>
+              <div>
+                <dt>Target</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? `${dhanSelectedSetup.targetPct ?? "-"}%`
+                    : "Not set"}
+                </dd>
+              </div>
+              <div>
+                <dt>Body Range</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? `${dhanSelectedSetup.minSignalCandlePct ?? "-"}% - ${
+                        dhanSelectedSetup.maxSignalCandlePct ?? "-"
+                      }%`
+                    : "Not set"}
+                </dd>
+              </div>
+              <div>
+                <dt>Strike Offset</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? dhanSelectedSetup.strikeOffset ?? "-"
+                    : "Not set"}
+                </dd>
+              </div>
+              <div>
+                <dt>Expiry</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? EXPIRY_OFFSET_OPTIONS.find(
+                        (option) =>
+                          option.id ===
+                          String(dhanSelectedSetup.expiryOffset ?? 0),
+                      )?.label ?? "Nearest"
+                    : "Not set"}
+                </dd>
+              </div>
+              <div>
+                <dt>SL Rule</dt>
+                <dd>
+                  {dhanSetupSavedToday
+                    ? `${formatSnakeLabel(
+                        dhanSelectedSetup.stopLossMode ?? "signal_low",
+                      )}${
+                        dhanSelectedSetup.stopLossPct
+                          ? ` / ${dhanSelectedSetup.stopLossPct}%`
+                          : ""
+                      }`
+                    : "Not set"}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="setup-editor-toggle-row dhan-setup-toggle-row">
+              <button
+                type="button"
+                className="action-button action-button--secondary"
+                onClick={() =>
+                  setSetupEditorOpen((current) => ({
+                    ...current,
+                    [dhanSetupStrategyKey]: !dhanSetupEditorOpen,
+                  }))
+                }
+              >
+                {dhanSetupEditorOpen
+                  ? "Hide Update Section"
+                  : dhanSetupSavedToday
+                    ? "Edit Setup"
+                    : "Add Setup"}
+              </button>
+            </div>
+
+            {dhanSetupEditorOpen ? (
+              <form
+                className="backtest-form live-setup-form"
+                onSubmit={(event) =>
+                  saveStrategyContracts(event, dhanSetupStrategyKey)
+                }
+              >
+              <label className="form-field segmented-field">
+                Option Side
+                <div className="segmented-toggle segmented-toggle--three">
+                  {["PE", "CE", "BOTH"].map((side) => (
+                    <button
+                      key={side}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        dhanSelectedSide === side
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() => {
+                        const nextContracts =
+                          side === "BOTH"
+                            ? ["PE", "CE"]
+                            : [side, ""];
+                        updateContractField(
+                          dhanSetupStrategyKey,
+                          "contract1",
+                          nextContracts[0],
+                        );
+                        updateContractField(
+                          dhanSetupStrategyKey,
+                          "contract2",
+                          nextContracts[1],
+                        );
+                      }}
+                    >
+                      {side === "BOTH" ? "Both" : side}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="form-field">
+                Start Time
+                <input
+                  type="time"
+                  value={dhanSelectedForm.scheduleStart}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "scheduleStart",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                End Time
+                <input
+                  type="time"
+                  value={dhanSelectedForm.scheduleEnd}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "scheduleEnd",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Target %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={dhanSelectedForm.targetPct}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "targetPct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Max Body %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={dhanSelectedForm.maxSignalCandlePct}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "maxSignalCandlePct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Min Body %
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={dhanSelectedForm.minSignalCandlePct}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "minSignalCandlePct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Strike Offset
+                <input
+                  type="number"
+                  step="50"
+                  value={dhanSelectedForm.strikeOffset}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "strikeOffset",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Expiry
+                <select
+                  value={dhanSelectedForm.expiryOffset}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "expiryOffset",
+                      event.target.value,
+                    )
+                  }
+                >
+                  {EXPIRY_OFFSET_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="form-field">
+                SL Mode
+                <select
+                  value={dhanSelectedForm.stopLossMode}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "stopLossMode",
+                      event.target.value,
+                    )
+                  }
+                >
+                  <option value="signal_low">Signal Low</option>
+                  <option value="percent">Fixed %</option>
+                </select>
+              </label>
+              <label className="form-field">
+                SL %
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={dhanSelectedForm.stopLossPct}
+                  onChange={(event) =>
+                    updateContractField(
+                      dhanSetupStrategyKey,
+                      "stopLossPct",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <button
+                type="submit"
+                className="action-button"
+                disabled={contractSaving}
+              >
+                {contractSaving ? "Saving..." : "Save Dhan Setup"}
+              </button>
+              </form>
+            ) : null}
+
+            <div className="bot-command-card__footer live-command-card__footer">
+              <div className="bot-command-card__trade">
+                <div className="bot-command-card__trade-line">
+                  <span className="empty-state-icon" aria-hidden="true">
+                    {dhanSetupSavedToday ? "OK" : "!"}
+                  </span>
+                  <strong>
+                    {dhanSetupSavedToday
+                      ? `Setup saved for ${dhanSelectedSetup.date ?? "today"}`
+                      : "Daily setup is not saved yet"}
+                  </strong>
+                </div>
+                <span className="muted-cell">
+                  Last update: {formatDateTime(dhanLiveStatus.updatedAt)}
+                </span>
+              </div>
+              <div className="action-row live-command-card__actions">
+                <button
+                  type="button"
+                  className={`action-button ${
+                    dhanSelectedStrategyEnabled
+                      ? "action-button--sell"
+                      : "action-button--buy"
+                  }`}
+                  onClick={() => toggleDhanLiveTrading(!dhanSelectedStrategyEnabled)}
+                  disabled={liveActionBusy === "dhan-toggle"}
+                >
+                  {liveActionBusy === "dhan-toggle"
+                    ? "Updating..."
+                    : dhanSelectedStrategyEnabled
+                      ? "Turn Off"
+                      : "Turn On"}
+                </button>
+                <button
+                  type="button"
+                  className="action-button action-button--secondary"
+                  onClick={refreshDhanLiveTradingData}
+                  disabled={liveActionBusy === "dhan-refresh"}
+                >
+                  {liveActionBusy === "dhan-refresh"
+                    ? "Refreshing..."
+                    : "Refresh"}
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-title">Manual Dhan Test Order</p>
+              </div>
+            </div>
+            <form
+              className="backtest-form live-setup-form"
+              onSubmit={placeDhanManualEntry}
+            >
+              <label className="form-field segmented-field">
+                Order Side
+                <div className="segmented-toggle">
+                  {["BUY", "SELL"].map((side) => (
+                    <button
+                      key={side}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        dhanManualEntryForm.transactionType === side
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() =>
+                        updateDhanManualEntryField("transactionType", side)
+                      }
+                    >
+                      {side}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="form-field segmented-field">
+                Option
+                <div className="segmented-toggle">
+                  {["PE", "CE"].map((optionType) => (
+                    <button
+                      key={optionType}
+                      type="button"
+                      className={`segmented-toggle__button ${
+                        dhanManualEntryForm.optionType === optionType
+                          ? "segmented-toggle__button--active"
+                          : ""
+                      }`}
+                      onClick={() =>
+                        updateDhanManualEntryField("optionType", optionType)
+                      }
+                    >
+                      {optionType}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="form-field">
+                Strike
+                <input
+                  type="number"
+                  min="0"
+                  step="50"
+                  placeholder="23550"
+                  value={dhanManualEntryForm.strike}
+                  onChange={(event) =>
+                    updateDhanManualEntryField("strike", event.target.value)
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Quantity
+                <input
+                  type="number"
+                  min={DHAN_NIFTY_LOT_SIZE}
+                  step={DHAN_NIFTY_LOT_SIZE}
+                  value={dhanManualEntryForm.quantity}
+                  onChange={(event) =>
+                    updateDhanManualEntryField("quantity", event.target.value)
+                  }
+                />
+              </label>
+              <label className="form-field">
+                Expiry Optional (blank = nearest)
+                <input
+                  type="date"
+                  value={dhanManualEntryForm.expiry}
+                  onChange={(event) =>
+                    updateDhanManualEntryField("expiry", event.target.value)
+                  }
+                />
+              </label>
+              <button
+                type="submit"
+                className="action-button action-button--buy"
+                disabled={
+                  !dhanSelectedStrategyEnabled ||
+                  liveActionBusy === "dhan-manual-entry"
+                }
+              >
+                {liveActionBusy === "dhan-manual-entry"
+                  ? "Placing..."
+                  : "Place Manual Entry"}
+              </button>
+            </form>
+            <p className="panel-note">
+              This places a real Dhan market order. Use the Active Dhan
+              Positions table below to exit the position manually.
+            </p>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-title">Active Dhan Positions</p>
+              </div>
+            </div>
+            {dhanActivePositions.length ? (
+              <div className="table-wrap live-position-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Segment</th>
+                      <th>Qty</th>
+                      <th>Avg</th>
+                      <th>LTP</th>
+                      <th>PnL</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dhanActivePositions.map((position) => {
+                      const securityId =
+                        position.securityId ?? position.security_id;
+                      const quantity = Number(
+                        position.netQuantity ??
+                          position.netQty ??
+                          position.quantity ??
+                          0,
+                      );
+                      return (
+                        <tr key={`${securityId}-${position.tradingSymbol}`}>
+                          <td>
+                            {position.tradingSymbol ??
+                              position.tradingsymbol ??
+                              "-"}
+                          </td>
+                          <td>{position.exchangeSegment ?? "-"}</td>
+                          <td>{formatCount(quantity)}</td>
+                          <td>
+                            {formatCurrency(
+                              position.buyAvg ??
+                                position.averagePrice ??
+                                position.costPrice,
+                            )}
+                          </td>
+                          <td>
+                            {formatCurrency(
+                              position.lastTradedPrice ?? position.ltp,
+                            )}
+                          </td>
+                          <td>
+                            <PnlValue
+                              value={
+                                position.unrealizedProfit ??
+                                position.unrealisedProfit ??
+                                position.pnl ??
+                                position.realizedProfit
+                              }
+                            />
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="table-action-button table-action-button--danger"
+                              disabled={
+                                !dhanSelectedStrategyEnabled ||
+                                liveActionBusy === `dhan-exit-${securityId}`
+                              }
+                              onClick={() => exitDhanPosition(position)}
+                            >
+                              {liveActionBusy === `dhan-exit-${securityId}`
+                                ? "Exiting..."
+                                : "Exit"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="empty-copy">No active Dhan positions available.</p>
+            )}
+          </section>
+        </section>
       ) : activeView === "broker" ? (
         <section className="section-block">
           <div className="section-heading">
             <p className="eyebrow">Broker</p>
-            <h2 className="section-title">Zerodha connection</h2>
+            <h2 className="section-title">Broker connections</h2>
           </div>
 
           <section className="content-grid">
@@ -4545,6 +6196,74 @@ export function App() {
             <article className="panel">
               <div className="panel-header">
                 <div>
+                  <p className="panel-title">Dhan Connection</p>
+                </div>
+              </div>
+
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="action-button"
+                  onClick={() => cacheDhanInstrumentMaster(false)}
+                  disabled={dhanMasterBusy}
+                >
+                  {dhanMasterBusy ? "Caching..." : "Cache Instrument Master"}
+                </button>
+                <button
+                  type="button"
+                  className="action-button action-button--secondary"
+                  onClick={() => cacheDhanInstrumentMaster(true)}
+                  disabled={dhanMasterBusy}
+                >
+                  Refresh Master
+                </button>
+              </div>
+
+              <dl className="status-list">
+                <div>
+                  <dt>Client ID</dt>
+                  <dd>{dhan.clientIdConfigured ? "Configured" : "Missing"}</dd>
+                </div>
+                <div>
+                  <dt>Access Token</dt>
+                  <dd>
+                    {dhan.accessTokenConfigured ? "Configured" : "Missing"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Live Status</dt>
+                  <dd>{dhanLiveStatus.dhanReady ? "Ready" : "Not ready"}</dd>
+                </div>
+                <div>
+                  <dt>Instrument Master</dt>
+                  <dd>
+                    {dhanInstrumentMaster.cached
+                      ? `${formatCount(dhanInstrumentMaster.filteredRows ?? dhanInstrumentMaster.rows ?? 0)} NIFTY option rows cached`
+                      : "Not cached today"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Source Rows</dt>
+                  <dd>
+                    {dhanInstrumentMaster.sourceRows == null
+                      ? "-"
+                      : formatCount(dhanInstrumentMaster.sourceRows)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Cached At</dt>
+                  <dd>{formatDateTime(dhanInstrumentMaster.updatedAt)}</dd>
+                </div>
+                <div>
+                  <dt>Cache File</dt>
+                  <dd>{dhanInstrumentMaster.path ?? "Not available"}</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article className="panel">
+              <div className="panel-header">
+                <div>
                   <p className="panel-title">Runtime Settings</p>
                 </div>
               </div>
@@ -4577,6 +6296,57 @@ export function App() {
                   <dd>
                     {strategyConfig.effectiveContracts?.contract1 || "-"} /{" "}
                     {strategyConfig.effectiveContracts?.contract2 || "-"}
+                  </dd>
+                </div>
+              </dl>
+            </article>
+
+            <article className="panel">
+              <div className="panel-header">
+                <div>
+                  <p className="panel-title">Option Candle Storage</p>
+                </div>
+              </div>
+
+              <p className="panel-copy">
+                Run this manually after market close, ideally around 17:00, to
+                save today's NIFTY and SENSEX option candles for backtesting.
+              </p>
+
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="action-button"
+                  onClick={() => runOptionCandleStorage("ALL")}
+                  disabled={candleStorageBusy}
+                >
+                  {candleStorageBusy ? "Storing..." : "Store Today Candles"}
+                </button>
+              </div>
+
+              <dl className="status-list">
+                <div>
+                  <dt>Mode</dt>
+                  <dd>Manual only</dd>
+                </div>
+                <div>
+                  <dt>Recommended Time</dt>
+                  <dd>17:00</dd>
+                </div>
+                <div>
+                  <dt>Last Result</dt>
+                  <dd>
+                    {candleStorageResult
+                      ? `${formatCount(candleStorageResult.totalCandles ?? 0)} candles`
+                      : "Not run this session"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Contracts</dt>
+                  <dd>
+                    {candleStorageResult
+                      ? formatCount(candleStorageResult.totalContracts ?? 0)
+                      : "-"}
                   </dd>
                 </div>
               </dl>
@@ -4849,7 +6619,7 @@ export function App() {
                 <span>Balance Invested</span>
                 <input
                   type="number"
-                  min="75"
+                  min="65"
                   step="1"
                   value={backtestForm.balance}
                   onChange={(event) =>
@@ -5351,23 +7121,23 @@ export function App() {
                   role="group"
                   aria-label="5m backtest instrument"
                 >
-                  {["NIFTY", "SENSEX"].map((instrument) => (
+                  {BACKTEST_INSTRUMENT_OPTIONS.map((option) => (
                     <button
-                      key={instrument}
+                      key={option.id}
                       type="button"
                       className={`segmented-toggle__button ${
-                        niftyFiveMinuteBacktestForm.instrument === instrument
+                        niftyFiveMinuteBacktestForm.instrument === option.id
                           ? "segmented-toggle__button--active"
                           : ""
                       }`}
                       onClick={() =>
                         updateNiftyFiveMinuteBacktestField(
                           "instrument",
-                          instrument,
+                          option.id,
                         )
                       }
                     >
-                      {instrument}
+                      {option.label}
                     </button>
                   ))}
                 </div>
@@ -5412,6 +7182,8 @@ export function App() {
                       placeholder={
                         niftyFiveMinuteBacktestForm.instrument === "SENSEX"
                           ? "76000PE"
+                          : niftyFiveMinuteBacktestForm.instrument === "BANKNIFTY"
+                            ? "56000PE"
                           : "24000PE"
                       }
                       onChange={(event) =>
@@ -5431,6 +7203,8 @@ export function App() {
                       placeholder={
                         niftyFiveMinuteBacktestForm.instrument === "SENSEX"
                           ? "76200CE"
+                          : niftyFiveMinuteBacktestForm.instrument === "BANKNIFTY"
+                            ? "56200CE"
                           : "24300CE"
                       }
                       onChange={(event) =>
@@ -5477,7 +7251,8 @@ export function App() {
                     <input
                       type="number"
                       step={
-                        niftyFiveMinuteBacktestForm.instrument === "SENSEX"
+                        niftyFiveMinuteBacktestForm.instrument === "SENSEX" ||
+                        niftyFiveMinuteBacktestForm.instrument === "BANKNIFTY"
                           ? "100"
                           : "50"
                       }
@@ -5493,6 +7268,25 @@ export function App() {
                   </label>
                 </>
               )}
+
+              <label className="form-field">
+                <span>Expiry</span>
+                <select
+                  value={niftyFiveMinuteBacktestForm.expiryOffset}
+                  onChange={(event) =>
+                    updateNiftyFiveMinuteBacktestField(
+                      "expiryOffset",
+                      event.target.value,
+                    )
+                  }
+                >
+                  {EXPIRY_OFFSET_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
               <label className="form-field">
                 <span>Entry Day</span>
@@ -5628,6 +7422,101 @@ export function App() {
                   required
                 />
               </label>
+              <details className="advanced-backtest-fields">
+                <summary>Advanced filters</summary>
+                <label className="toggle-control">
+                  <input
+                    type="checkbox"
+                    checked={niftyFiveMinuteBacktestForm.requireVwap}
+                    onChange={(event) =>
+                      updateNiftyFiveMinuteBacktestField(
+                        "requireVwap",
+                        event.target.checked,
+                      )
+                    }
+                  />
+                  <span>Close below VWAP</span>
+                </label>
+                <label className="form-field">
+                  <span>Volume Multiplier</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={niftyFiveMinuteBacktestForm.minVolumeMultiplier}
+                    placeholder="0 disables"
+                    onChange={(event) =>
+                      updateNiftyFiveMinuteBacktestField(
+                        "minVolumeMultiplier",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  <span>Volume Lookback</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={niftyFiveMinuteBacktestForm.volumeLookback}
+                    onChange={(event) =>
+                      updateNiftyFiveMinuteBacktestField(
+                        "volumeLookback",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  <span>Max Entry Gap %</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={niftyFiveMinuteBacktestForm.maxEntryGapPct}
+                    placeholder="0 disables"
+                    onChange={(event) =>
+                      updateNiftyFiveMinuteBacktestField(
+                        "maxEntryGapPct",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  <span>Trailing SL %</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={niftyFiveMinuteBacktestForm.trailingStopPct}
+                    placeholder="0 disables"
+                    onChange={(event) =>
+                      updateNiftyFiveMinuteBacktestField(
+                        "trailingStopPct",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+                <label className="form-field">
+                  <span>Max Trades / Day</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={niftyFiveMinuteBacktestForm.maxTradesPerDay}
+                    placeholder="0 disables"
+                    onChange={(event) =>
+                      updateNiftyFiveMinuteBacktestField(
+                        "maxTradesPerDay",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+              </details>
               <button
                 type="submit"
                 className="action-button action-button--buy"
@@ -5677,45 +7566,45 @@ export function App() {
                   )}
                 />
                 <MetricCard
-                  label="Contracts"
+                  label="Avg Trade"
                   value={
-                    niftyFiveMinuteBacktestResult.data?.contracts?.length
-                      ? niftyFiveMinuteBacktestResult.data.contracts
-                          .map(formatCompactOptionSymbol)
-                          .join(" / ")
-                      : "Not available"
+                    <PnlValue
+                      value={
+                        niftyFiveMinuteBacktestResult.summary?.expectancy ?? 0
+                      }
+                    />
                   }
-                />
-                <MetricCard
-                  label="Instrument"
-                  value={
-                    niftyFiveMinuteBacktestResult.data?.underlying ??
-                    niftyFiveMinuteBacktestResult.data?.instrument ??
-                    "Option"
-                  }
-                />
-                <MetricCard
-                  label="Timeframe"
-                  value={niftyFiveMinuteBacktestResult.data?.interval ?? "5m"}
-                />
-                <MetricCard
-                  label="Target / SL"
-                  value={`${formatNumber(niftyFiveMinuteBacktestResult.request?.target_pct ?? niftyFiveMinuteBacktestResult.request?.targetPct)}% / ${formatNumber(niftyFiveMinuteBacktestResult.request?.stop_loss_pct ?? niftyFiveMinuteBacktestResult.request?.stopLossPct)}%`}
-                />
-                <MetricCard
-                  label="Body Range"
-                  value={`${formatNumber(niftyFiveMinuteBacktestResult.request?.min_body_pct ?? niftyFiveMinuteBacktestResult.request?.minBodyPct)}% - ${formatNumber(niftyFiveMinuteBacktestResult.request?.max_body_pct ?? niftyFiveMinuteBacktestResult.request?.maxBodyPct)}%`}
-                />
-                <MetricCard
-                  label="Signal Data"
-                  value={formatSnakeLabel(
-                    niftyFiveMinuteBacktestResult.data?.signalDataSource,
+                  tone={getPnlTone(
+                    niftyFiveMinuteBacktestResult.summary?.expectancy ?? 0,
                   )}
                 />
                 <MetricCard
-                  label="1m Data"
-                  value={formatSnakeLabel(
-                    niftyFiveMinuteBacktestResult.data?.executionDataSource,
+                  label="Best / Worst"
+                  value={`${formatCurrency(niftyFiveMinuteBacktestResult.summary?.bestTrade ?? 0)} / ${formatCurrency(niftyFiveMinuteBacktestResult.summary?.worstTrade ?? 0)}`}
+                />
+                <MetricCard
+                  label="Signal → Trade"
+                  value={`${formatCount(niftyFiveMinuteRawBuySignals)} → ${formatCount(niftyFiveMinuteExecutedTrades)}`}
+                />
+                <MetricCard
+                  label="Trade Conversion"
+                  value={formatPercent(niftyFiveMinuteTradeConversion)}
+                />
+                <MetricCard
+                  label="Body Pass Rate"
+                  value={formatPercent(niftyFiveMinuteBodyPassRate)}
+                />
+                <MetricCard
+                  label="Green No Arrow"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data
+                      ?.greenStateButNoFreshSignalCount,
+                  )}
+                />
+                <MetricCard
+                  label="Candles Scanned"
+                  value={formatCount(
+                    niftyFiveMinuteBacktestResult.data?.candleCount,
                   )}
                 />
                 <MetricCard
@@ -5725,14 +7614,7 @@ export function App() {
                   )}
                 />
                 <MetricCard
-                  label="Fresh BUY Arrows"
-                  value={formatCount(
-                    niftyFiveMinuteBacktestResult.data?.freshBuyArrowCount ??
-                      niftyFiveMinuteBacktestResult.data?.rawBuySignalCount,
-                  )}
-                />
-                <MetricCard
-                  label="Body Accepted"
+                  label="Accepted Signals"
                   value={formatCount(
                     niftyFiveMinuteBacktestResult.data?.bodyAcceptedSignalCount,
                   )}
@@ -5748,6 +7630,22 @@ export function App() {
                   value={formatCount(
                     niftyFiveMinuteBacktestResult.data?.skippedCount,
                   )}
+                />
+                <MetricCard
+                  label="Top Skip Reason"
+                  value={
+                    niftyFiveMinuteTopSkipReason
+                      ? `${formatSnakeLabel(niftyFiveMinuteTopSkipReason[0])} (${formatCount(niftyFiveMinuteTopSkipReason[1])})`
+                      : "None"
+                  }
+                />
+                <MetricCard
+                  label="Advanced Filters"
+                  value={
+                    niftyFiveMinuteActiveAdvancedFilters.length
+                      ? niftyFiveMinuteActiveAdvancedFilters.join(" / ")
+                      : "Off"
+                  }
                 />
               </section>
 
@@ -5819,7 +7717,59 @@ export function App() {
                       5m Backtest Trades
                     </p>
                   </div>
+                  <button
+                    type="button"
+                    className="action-button action-button--secondary"
+                    onClick={exportNiftyFiveMinuteBacktestTradesCsv}
+                    disabled={!niftyFiveMinuteBacktestTrades.length}
+                  >
+                    Download CSV
+                  </button>
                 </div>
+                <div className="action-row action-row--wrap">
+                  <label className="form-field form-field--inline">
+                    <span>Target group</span>
+                    <select
+                      value={selectedBacktestGroupId}
+                      onChange={(event) => {
+                        setSelectedBacktestGroupId(event.target.value);
+                        setBacktestGroupAddFeedback(null);
+                      }}
+                    >
+                      <option value="">Select group</option>
+                      {backtestGroups.map((group) => (
+                        <option key={group.id} value={group.id}>
+                          {group.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="action-button action-button--ghost"
+                    onClick={() =>
+                      addTradesToBacktestGroup(niftyFiveMinuteBacktestTrades)
+                    }
+                    disabled={
+                      !niftyFiveMinuteBacktestTrades.length ||
+                      !selectedBacktestGroupId ||
+                      allBacktestTradesAddedToSelectedGroup
+                    }
+                  >
+                    {allBacktestTradesAddedToSelectedGroup
+                      ? "All Added"
+                      : backtestGroupAddFeedback?.key === "all"
+                        ? "Added"
+                        : "Add All To Group"}
+                  </button>
+                </div>
+                {backtestGroupAddFeedback ? (
+                  <div
+                    className={`group-add-feedback group-add-feedback--${backtestGroupAddFeedback.status}`}
+                  >
+                    {backtestGroupAddFeedback.message}
+                  </div>
+                ) : null}
                 {niftyFiveMinuteBacktestTrades.length ? (
                   <div className="table-wrap">
                     <table>
@@ -5834,10 +7784,15 @@ export function App() {
                           <th>Body %</th>
                           <th>PnL</th>
                           <th>Result</th>
+                          <th>Group</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {niftyFiveMinuteBacktestTrades.map((trade) => (
+                        {niftyFiveMinuteBacktestTrades.map((trade) => {
+                          const tradeId = buildBacktestTradeId(trade);
+                          const isTradeAlreadyAdded =
+                            selectedBacktestGroupTradeIds.has(tradeId);
+                          return (
                           <tr key={`${trade.optionSymbol}-${trade.entryTime}`}>
                             <td>{formatCompactOptionSymbol(trade.optionSymbol)}</td>
                             <td>{formatTableDateTime(trade.candleTime)}</td>
@@ -5871,8 +7826,23 @@ export function App() {
                                 {trade.status} · {formatSnakeLabel(trade.exitReason)}
                               </span>
                             </td>
+                            <td>
+                              <button
+                                type="button"
+                                className={`field-mini-button ${
+                                  isTradeAlreadyAdded
+                                    ? "field-mini-button--success"
+                                    : ""
+                                }`}
+                                onClick={() => addTradesToBacktestGroup([trade])}
+                                disabled={!selectedBacktestGroupId || isTradeAlreadyAdded}
+                              >
+                                {isTradeAlreadyAdded ? "Added" : "Add"}
+                              </button>
+                            </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -5946,692 +7916,288 @@ export function App() {
             </>
           ) : null}
         </section>
-      ) : activeView === "optionBacktest" ? (
+      ) : activeView === "backtestGroups" ? (
         <section className="section-block">
           <div className="section-heading">
-            <p className="eyebrow">Option Backtesting</p>
-            <h2 className="section-title">Manual contract simulator</h2>
+            <p className="eyebrow">Backtest Groups</p>
+            <h2 className="section-title">Grouped trade analytics</h2>
           </div>
 
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="panel-title">Option Contract Inputs</p>
+          <section className="content-grid">
+            <article className="panel">
+              <div className="panel-header">
+                <div>
+                  <p className="panel-title">Create Group</p>
+                </div>
               </div>
-            </div>
+              <form className="action-row action-row--wrap" onSubmit={createBacktestGroup}>
+                <label className="form-field form-field--inline">
+                  <span>Group name</span>
+                  <input
+                    type="text"
+                    value={newBacktestGroupName}
+                    placeholder="Morning breakout, May test..."
+                    onChange={(event) =>
+                      setNewBacktestGroupName(event.target.value)
+                    }
+                  />
+                </label>
+                <label className="form-field form-field--inline form-field--wide">
+                  <span>Description</span>
+                  <textarea
+                    value={newBacktestGroupDescription}
+                    placeholder="What are you testing in this group?"
+                    rows={2}
+                    onChange={(event) =>
+                      setNewBacktestGroupDescription(event.target.value)
+                    }
+                  />
+                </label>
+                <button type="submit" className="action-button">
+                  Create Group
+                </button>
+              </form>
+            </article>
 
-            <form
-              className="backtest-form"
-              onSubmit={runOptionContractBacktest}
-            >
-              <label className="form-field">
-                <span>Exchange</span>
-                <select
-                  value={optionBacktestForm.exchange}
-                  onChange={(event) =>
-                    updateOptionBacktestField("exchange", event.target.value)
-                  }
-                  required
-                >
-                  {OPTION_BACKTEST_EXCHANGES.map((exchange) => (
-                    <option key={exchange} value={exchange}>
-                      {exchange}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="form-field">
-                <span>Contract 1 side</span>
-                <input
-                  type="text"
-                  value={optionBacktestForm.optionSymbol}
-                  placeholder="PE or CE"
-                  onChange={(event) =>
-                    updateOptionBacktestField(
-                      "optionSymbol",
-                      event.target.value,
-                    )
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Contract 2 side (optional)</span>
-                <input
-                  type="text"
-                  value={optionBacktestForm.optionSymbol2}
-                  placeholder="CE"
-                  onChange={(event) =>
-                    updateOptionBacktestField(
-                      "optionSymbol2",
-                      event.target.value,
-                    )
-                  }
-                />
-              </label>
-              <div className="form-field segmented-field">
-                <span>Candle Timeframe</span>
-                <div
-                  className="segmented-toggle"
-                  role="group"
-                  aria-label="Option candle timeframe"
-                >
-                  {["1m", "5m"].map((interval) => (
+            <article className="panel">
+              <div className="panel-header">
+                <div>
+                  <p className="panel-title">Groups</p>
+                </div>
+              </div>
+              {backtestGroups.length ? (
+                <div className="group-chip-list">
+                  {backtestGroups.map((group) => (
                     <button
-                      key={interval}
+                      key={group.id}
                       type="button"
-                      className={`segmented-toggle__button ${
-                        optionBacktestForm.interval === interval
-                          ? "segmented-toggle__button--active"
+                      className={`group-chip ${
+                        activeBacktestGroup?.id === group.id
+                          ? "group-chip--active"
                           : ""
                       }`}
                       onClick={() =>
-                        updateOptionBacktestField("interval", interval)
+                        setActiveBacktestGroupId((current) =>
+                          current === group.id ? "" : group.id,
+                        )
                       }
                     >
-                      {interval}
+                      <span>
+                        {group.name}
+                        {group.description ? (
+                          <small>{group.description}</small>
+                        ) : null}
+                      </span>
+                      <strong>{formatCount((group.trades ?? []).length)}</strong>
                     </button>
                   ))}
                 </div>
-              </div>
-              <div className="form-field segmented-field">
-                <span>Entry Signal</span>
-                <div
-                  className="segmented-toggle segmented-toggle--three"
-                  role="group"
-                  aria-label="Option entry signal"
-                >
-                  {OPTION_BACKTEST_ENTRY_SIGNALS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`segmented-toggle__button ${
-                        optionBacktestForm.entrySignal === option.id
-                          ? "segmented-toggle__button--active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        updateOptionBacktestField("entrySignal", option.id)
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  ))}
+              ) : (
+                <div className="empty-card">
+                  <span className="empty-state-icon" aria-hidden="true">
+                    BG
+                  </span>
+                  <strong>No groups yet</strong>
+                  <p>Create a group, then add trades from 5m Option Backtest.</p>
                 </div>
-              </div>
-              <label className="form-field">
-                <span>Entry Day</span>
-                <input
-                  type="date"
-                  value={optionBacktestForm.startDate}
-                  onChange={(event) =>
-                    updateOptionBacktestField("startDate", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Exit Day</span>
-                <input
-                  type="date"
-                  value={optionBacktestForm.endDate}
-                  onChange={(event) =>
-                    updateOptionBacktestField("endDate", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Balance</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={optionBacktestForm.balance}
-                  onChange={(event) =>
-                    updateOptionBacktestField("balance", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Target %</span>
-                <input
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  value={optionBacktestForm.targetPct}
-                  onChange={(event) =>
-                    updateOptionBacktestField("targetPct", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Max Body %</span>
-                <input
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  value={optionBacktestForm.maxSignalCandlePct}
-                  onChange={(event) =>
-                    updateOptionBacktestField(
-                      "maxSignalCandlePct",
-                      event.target.value,
-                    )
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Strike Offset</span>
-                <input
-                  type="number"
-                  step={optionBacktestForm.exchange === "BFO" ? "100" : "50"}
-                  value={optionBacktestForm.strikeOffset}
-                  placeholder="0, 100, -100"
-                  onChange={(event) =>
-                    updateOptionBacktestField(
-                      "strikeOffset",
-                      event.target.value,
-                    )
-                  }
-                />
-              </label>
-              <label className="form-field">
-                <span>Stop Loss %</span>
-                <input
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  value={optionBacktestForm.stopLossPct}
-                  onChange={(event) =>
-                    updateOptionBacktestField("stopLossPct", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <div className="form-field segmented-field">
-                <span>Stop Loss Rule</span>
-                <div
-                  className="segmented-toggle"
-                  role="group"
-                  aria-label="Option stop loss rule"
-                >
-                  {BACKTEST_STOP_LOSS_MODES.map((mode) => (
-                    <button
-                      key={mode.id}
-                      type="button"
-                      className={`segmented-toggle__button ${
-                        optionBacktestForm.stopLossMode === mode.id
-                          ? "segmented-toggle__button--active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        updateOptionBacktestField("stopLossMode", mode.id)
-                      }
-                    >
-                      {mode.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <label className="form-field">
-                <span>Entry Time</span>
-                <input
-                  type="time"
-                  value={optionBacktestForm.entryTime}
-                  onChange={(event) =>
-                    updateOptionBacktestField("entryTime", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Exit Time</span>
-                <input
-                  type="time"
-                  value={optionBacktestForm.exitTime}
-                  onChange={(event) =>
-                    updateOptionBacktestField("exitTime", event.target.value)
-                  }
-                  required
-                />
-              </label>
-              <button
-                type="submit"
-                className="action-button action-button--buy"
-                disabled={optionBacktestLoading}
-              >
-                {optionBacktestLoading ? "Running..." : "Run Option Backtest"}
-              </button>
-            </form>
+              )}
+            </article>
           </section>
 
-          {optionBacktestResult ? (
+          {activeBacktestGroup ? (
             <>
-              <section className="panel pnl-report-panel">
-                <div className="panel-header">
+              <section className="panel bot-command-card backtest-group-summary-card">
+                <div className="bot-command-card__top">
                   <div>
-                    <p className="panel-title">Option Backtest Report</p>
+                    <p className="eyebrow">Selected Group</p>
+                    <h2>{activeBacktestGroup.name}</h2>
+                    <p className="bot-command-card__subtitle">
+                      {formatCount(activeBacktestGroupTrades.length)} saved
+                      trades
+                    </p>
                   </div>
                   <button
                     type="button"
-                    className="action-button"
-                    onClick={exportOptionBacktestReportCsv}
-                    disabled={backtestExportLoading}
+                    className="action-button action-button--ghost"
+                    onClick={() => deleteBacktestGroup(activeBacktestGroup.id)}
                   >
-                    {backtestExportLoading
-                      ? "Saving CSV..."
-                      : "Save Report CSV"}
+                    Delete Group
                   </button>
                 </div>
-              </section>
 
-              <section className="report-metrics-grid option-backtest-metrics">
-                <MetricCard
-                  label="Net PnL"
-                  value={
-                    <PnlValue
-                      value={optionBacktestResult.summary?.netPnl ?? 0}
-                    />
-                  }
-                  tone={getPnlTone(optionBacktestResult.summary?.netPnl ?? 0)}
-                />
-                <MetricCard
-                  label="Trades"
-                  value={formatCount(optionBacktestResult.summary?.tradeCount)}
-                />
-                <MetricCard
-                  label="Wins / Losses"
-                  value={`${formatCount(optionBacktestResult.summary?.wins)} / ${formatCount(optionBacktestResult.summary?.losses)}`}
-                />
-                <MetricCard
-                  label="Win Rate"
-                  value={formatPercent(optionBacktestResult.summary?.winRate)}
-                />
-                <MetricCard
-                  label="Contracts"
-                  value={
-                    (optionBacktestResult.data?.contracts || []).join(" / ") ||
-                    "-"
-                  }
-                />
-                <MetricCard
-                  label="Timeframe"
-                  value={
-                    optionBacktestResult.data?.signalInterval ||
-                    optionBacktestResult.data?.interval ||
-                    "-"
-                  }
-                />
-                <MetricCard
-                  label="Signal Rule"
-                  value={formatSnakeLabel(
-                    optionBacktestResult.data?.signalMode,
-                  )}
-                />
-                <MetricCard
-                  label="VWAP Filter"
-                  value={
-                    optionBacktestResult.request?.require_vwap ? "ON" : "OFF"
-                  }
-                />
-                <MetricCard
-                  label="Selected Signals"
-                  value={formatCount(
-                    optionBacktestResult.data?.selectedSignalCount,
-                  )}
-                />
-                <MetricCard
-                  label="Fast / Both Signals"
-                  value={`${formatCount(optionBacktestResult.data?.fastSignalCount)} / ${formatCount(optionBacktestResult.data?.bothSignalCount)}`}
-                />
-                <MetricCard
-                  label="Signal Data"
-                  value={formatSnakeLabel(
-                    optionBacktestResult.data?.signalDataSource,
-                  )}
-                />
-                <MetricCard
-                  label="1m Data"
-                  value={formatSnakeLabel(
-                    optionBacktestResult.data?.executionDataSource,
-                  )}
-                />
-              </section>
-
-              <section className="panel pnl-report-panel">
-                <div className="panel-header">
-                  <div>
-                    <p className="panel-title">Option Hourly PnL Report</p>
+                <div className="bot-command-card__main">
+                  <div className="bot-command-card__pnl">
+                    <span>Total PnL</span>
+                    <strong>
+                      <PnlValue value={activeBacktestGroupMetrics.totalPnl} />
+                    </strong>
+                    <small>
+                      {formatCount(activeBacktestGroupMetrics.totalTrades)}{" "}
+                      trades · {formatNumber(activeBacktestGroupMetrics.winRate)}
+                      % win rate
+                    </small>
                   </div>
-                  <label className="toggle-control">
-                    <input
-                      type="checkbox"
-                      checked={showHourlyPnl}
-                      onChange={(event) =>
-                        setShowHourlyPnl(event.target.checked)
-                      }
-                    />
-                    <span>Show hourly PnL</span>
-                  </label>
+
+                  <dl className="bot-command-card__stats backtest-group-summary-card__stats">
+                    <div>
+                      <dt>Trades</dt>
+                      <dd>{formatCount(activeBacktestGroupMetrics.totalTrades)}</dd>
+                    </div>
+                    <div>
+                      <dt>Win Rate</dt>
+                      <dd>{formatNumber(activeBacktestGroupMetrics.winRate)}%</dd>
+                    </div>
+                    <div>
+                      <dt>Profit Factor</dt>
+                      <dd>
+                        {Number.isFinite(activeBacktestGroupMetrics.profitFactor)
+                          ? formatNumber(activeBacktestGroupMetrics.profitFactor)
+                          : "∞"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Expectancy</dt>
+                      <dd>
+                        <PnlValue value={activeBacktestGroupMetrics.expectancy} />
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Best Trade</dt>
+                      <dd>
+                        <PnlValue value={activeBacktestGroupMetrics.bestTrade} />
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Worst Trade</dt>
+                      <dd>
+                        <PnlValue value={activeBacktestGroupMetrics.worstTrade} />
+                      </dd>
+                    </div>
+                  </dl>
                 </div>
-                <HourlyPnlReport
-                  buckets={optionBacktestHourlyPnlReport}
-                  showPnl={showHourlyPnl}
-                />
+
+                <div className="backtest-group-description-card">
+                  <span>Description</span>
+                  <p>
+                    {activeBacktestGroup.description ||
+                      "No description added for this group yet."}
+                  </p>
+                </div>
               </section>
 
-              {optionBacktestResult.data?.contractStats?.length ? (
-                <section className="panel">
+              <section className="content-grid">
+                <article className="panel pnl-report-panel">
                   <div className="panel-header">
                     <div>
-                      <p className="panel-title">Contract Breakdown</p>
+                      <p className="panel-title">Hourly PnL Report</p>
                     </div>
-                    <ColumnPicker
-                      label="Contract Breakdown"
-                      columns={optionContractStatsColumns}
-                      selected={selectedOptionContractStatsColumns}
-                      onToggle={(columnId) =>
-                        toggleColumn(
-                          columnId,
-                          selectedOptionContractStatsColumns,
-                          setSelectedOptionContractStatsColumns,
-                          optionContractStatsColumns,
-                        )
-                      }
-                      onReset={() =>
-                        setSelectedOptionContractStatsColumns(
-                          optionContractStatsColumns.map((column) => column.id),
-                        )
-                      }
-                    />
                   </div>
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          {visibleOptionContractStatsColumns.map((column) => (
-                            <th key={column.id}>{column.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {optionContractStatsTable.rows.map((contract) => (
-                          <tr key={contract.optionSymbol}>
-                            {visibleOptionContractStatsColumns.map((column) => {
-                              if (column.id === "optionSymbol")
-                                return (
-                                  <td key={column.id}>
-                                    {contract.optionSymbol}
-                                  </td>
-                                );
-                              if (column.id === "selectedSignals")
-                                return (
-                                  <td key={column.id}>
-                                    {formatCount(contract.selectedSignals)}
-                                  </td>
-                                );
-                              if (column.id === "fastBoth")
-                                return (
-                                  <td key={column.id}>
-                                    {formatCount(contract.fastSignals)} /{" "}
-                                    {formatCount(contract.bothSignals)}
-                                  </td>
-                                );
-                              if (column.id === "trades")
-                                return (
-                                  <td key={column.id}>
-                                    {formatCount(contract.trades)}
-                                  </td>
-                                );
-                              if (column.id === "skipped")
-                                return (
-                                  <td key={column.id}>
-                                    {formatCount(contract.skipped)}
-                                  </td>
-                                );
-                              if (column.id === "netPnl")
-                                return (
-                                  <td key={column.id}>
-                                    <PnlValue value={contract.netPnl} />
-                                  </td>
-                                );
-                              return <td key={column.id}>-</td>;
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <PaginationControls
-                    {...optionContractStatsTable.pagination.controls}
+                  <HourlyPnlReport
+                    buckets={activeBacktestGroupHourlyReport}
+                    showPnl={showHourlyPnl}
                   />
-                </section>
-              ) : null}
-
-              {optionBacktestResult.data?.optionTypeStats?.length ? (
-                <section className="panel">
+                </article>
+                <article className="panel pnl-report-panel">
                   <div className="panel-header">
                     <div>
-                      <p className="panel-title">CE / PE PnL Breakdown</p>
+                      <p className="panel-title">Weekday PnL Report</p>
                     </div>
-                    <ColumnPicker
-                      label="CE / PE Breakdown"
-                      columns={optionTypeStatsColumns}
-                      selected={selectedOptionTypeStatsColumns}
-                      onToggle={(columnId) =>
-                        toggleColumn(
-                          columnId,
-                          selectedOptionTypeStatsColumns,
-                          setSelectedOptionTypeStatsColumns,
-                          optionTypeStatsColumns,
-                        )
-                      }
-                      onReset={() =>
-                        setSelectedOptionTypeStatsColumns(
-                          optionTypeStatsColumns.map((column) => column.id),
-                        )
-                      }
-                    />
                   </div>
-                  <div className="table-wrap table-wrap--compact">
-                    <table>
-                      <thead>
-                        <tr>
-                          {visibleOptionTypeStatsColumns.map((column) => (
-                            <th key={column.id}>{column.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {optionTypeStatsTable.rows.map((item) => (
-                          <tr key={item.optionType}>
-                            {visibleOptionTypeStatsColumns.map((column) => {
-                              if (column.id === "optionType")
-                                return (
-                                  <td key={column.id}>{item.optionType}</td>
-                                );
-                              if (column.id === "trades")
-                                return (
-                                  <td key={column.id}>
-                                    {formatCount(item.trades)}
-                                  </td>
-                                );
-                              if (column.id === "winsLosses")
-                                return (
-                                  <td key={column.id}>
-                                    {formatCount(item.wins)} /{" "}
-                                    {formatCount(item.losses)}
-                                  </td>
-                                );
-                              if (column.id === "winRate")
-                                return (
-                                  <td key={column.id}>
-                                    {formatPercent(item.winRate)}
-                                  </td>
-                                );
-                              if (column.id === "netPnl")
-                                return (
-                                  <td key={column.id}>
-                                    <PnlValue value={item.netPnl} />
-                                  </td>
-                                );
-                              return <td key={column.id}>-</td>;
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <PaginationControls
-                    {...optionTypeStatsTable.pagination.controls}
+                  <WeekdayPnlReport
+                    buckets={activeBacktestGroupWeekdayReport}
                   />
-                </section>
-              ) : null}
-
-              <section className="panel pnl-report-panel">
-                <div className="panel-header">
-                  <div>
-                    <p className="panel-title">Option Weekday PnL Report</p>
-                  </div>
-                </div>
-                <WeekdayPnlReport buckets={optionBacktestWeekdayPnlReport} />
+                </article>
               </section>
 
               <section className="panel">
                 <div className="panel-header">
                   <div>
-                    <p className="panel-title">Option Backtest Trades</p>
+                    <p className="panel-title">Grouped Trades</p>
                   </div>
-                  <ColumnPicker
-                    label="Option Backtest Trades"
-                    columns={optionBacktestTradeColumns}
-                    selected={selectedOptionBacktestTradeColumns}
-                    onToggle={(columnId) =>
-                      toggleColumn(
-                        columnId,
-                        selectedOptionBacktestTradeColumns,
-                        setSelectedOptionBacktestTradeColumns,
-                        optionBacktestTradeColumns,
-                      )
-                    }
-                    onReset={() =>
-                      setSelectedOptionBacktestTradeColumns(
-                        optionBacktestTradeColumns.map((column) => column.id),
-                      )
-                    }
-                  />
                 </div>
-                {optionBacktestResult.trades?.length ? (
+                {activeBacktestGroupTrades.length ? (
                   <>
                     <div className="table-wrap">
                       <table>
                         <thead>
                           <tr>
-                            {visibleOptionBacktestTradeColumns.map((column) => (
-                              <th key={column.id}>{column.label}</th>
-                            ))}
+                            <th>Contract</th>
+                            <th>Signal</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>Entry / Exit</th>
+                            <th>PnL</th>
+                            <th>Result</th>
+                            <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {optionBacktestTradesTable.rows.map((trade) => (
-                            <tr
-                              key={`${trade.entryTime}-${trade.signal}-${trade.optionSymbol}`}
-                            >
-                              {visibleOptionBacktestTradeColumns.map(
-                                (column) => {
-                                  if (column.id === "signal")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatSignal(trade.signal)}
-                                      </td>
-                                    );
-                                  if (column.id === "entryTime")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatTableDateTime(trade.entryTime)}
-                                      </td>
-                                    );
-                                  if (column.id === "exitTime")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatTableDateTime(trade.exitTime)}
-                                      </td>
-                                    );
-                                  if (column.id === "optionSymbol")
-                                    return (
-                                      <td key={column.id}>
-                                        {trade.optionSymbol}
-                                      </td>
-                                    );
-                                  if (column.id === "quantity")
-                                    return (
-                                      <td key={column.id}>{trade.quantity}</td>
-                                    );
-                                  if (column.id === "entryPrice")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatCurrency(trade.entryPrice)}
-                                      </td>
-                                    );
-                                  if (column.id === "exitPrice")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatCurrency(trade.exitPrice)}
-                                      </td>
-                                    );
-                                  if (column.id === "stopLoss")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatCurrency(trade.stopLoss)}
-                                      </td>
-                                    );
-                                  if (column.id === "target")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatCurrency(trade.target)}
-                                      </td>
-                                    );
-                                  if (column.id === "netPnl")
-                                    return (
-                                      <td key={column.id}>
-                                        <PnlValue
-                                          value={trade.netPnl}
-                                          baseValue={trade.capitalUsed}
-                                        />
-                                      </td>
-                                    );
-                                  if (column.id === "status")
-                                    return (
-                                      <td key={column.id}>{trade.status}</td>
-                                    );
-                                  if (column.id === "exitReason")
-                                    return (
-                                      <td key={column.id}>
-                                        {formatSnakeLabel(trade.exitReason)}
-                                      </td>
-                                    );
-                                  return <td key={column.id}>-</td>;
-                                },
-                              )}
+                          {backtestGroupTradesTable.rows.map((trade) => {
+                            const tradeId =
+                              trade.id ?? buildBacktestTradeId(trade);
+                            return (
+                            <tr key={tradeId}>
+                              <td>
+                                {formatCompactOptionSymbol(trade.optionSymbol)}
+                              </td>
+                              <td>{formatTableDateTime(trade.candleTime)}</td>
+                              <td>{formatTableDateTime(trade.entryTime)}</td>
+                              <td>{formatTableDateTime(trade.exitTime)}</td>
+                              <td>
+                                {formatCurrency(trade.entryPrice)} /{" "}
+                                {formatCurrency(trade.exitPrice)}
+                              </td>
+                              <td>
+                                <PnlValue
+                                  value={trade.netPnl}
+                                  baseValue={trade.capitalUsed}
+                                />
+                              </td>
+                              <td>
+                                <span
+                                  className={`status-pill status-pill--${getStatusTone(trade.status)}`}
+                                >
+                                  {trade.status} · {formatSnakeLabel(trade.exitReason)}
+                                </span>
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="table-action-button table-action-button--danger"
+                                  onClick={() =>
+                                    deleteTradeFromBacktestGroup(
+                                      activeBacktestGroup.id,
+                                      tradeId,
+                                    )
+                                  }
+                                >
+                                  Delete
+                                </button>
+                              </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
-                    <PaginationControls
-                      {...optionBacktestTradesTable.pagination.controls}
-                    />
+                    <PaginationControls {...backtestGroupTradesTable.pagination.controls} />
                   </>
                 ) : (
                   <p className="empty-copy">
-                    No option-contract trades were generated for this
-                    configuration.
+                    This group is empty. Add trades from the 5m Option Backtest
+                    table.
                   </p>
                 )}
               </section>
             </>
+          ) : backtestGroups.length ? (
+            <div className="empty-card">
+              <span className="empty-state-icon" aria-hidden="true">
+                R
+              </span>
+              <strong>Select a group</strong>
+              <p>Choose a group above to view its analytics and saved trades.</p>
+            </div>
           ) : null}
         </section>
       ) : (
@@ -6736,6 +8302,35 @@ export function App() {
                   <dt>Source</dt>
                   <dd>{logsSource}</dd>
                 </div>
+                <div>
+                  <dt>Dhan Cached Candle</dt>
+                  <dd>
+                    {dhanLiveCachedCandle ? (
+                      <span className="log-cache-cell">
+                        <strong>
+                          {formatCompactOptionSymbol(
+                            dhanLiveCachedCandle.dhanCachedContract
+                              ?.tradingSymbol ??
+                              dhanLiveCachedCandle.tradingsymbol,
+                          )}
+                        </strong>
+                        <span>
+                          {formatTimeOnly(dhanLiveCachedCandle.candleTime)} · C{" "}
+                          {formatCurrency(dhanLiveCachedCandle.close)}
+                        </span>
+                        {dhanLiveCachedCandle.dhanCachedContract
+                          ?.securityId ? (
+                          <span>
+                            Dhan ID{" "}
+                            {dhanLiveCachedCandle.dhanCachedContract.securityId}
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      "Not available"
+                    )}
+                  </dd>
+                </div>
                 <div className="log-trend-card">
                   <dt>Nifty Trend</dt>
                   <dd>
@@ -6748,22 +8343,22 @@ export function App() {
                     <span className="log-trend-card__contract">
                       {latestNiftyTrendLog
                         ? formatCompactOptionSymbol(latestNiftyTrendLog.contract)
-                        : "Not available"}
+                      : "Not available"}
                     </span>
                   </dd>
                 </div>
                 <div className="log-trend-card">
-                  <dt>Sensex Trend</dt>
+                  <dt>Dhan Live Trend</dt>
                   <dd>
                     <span className="log-trend-card__row">
                       <span>Fast</span>
-                      <TrendBadge value={latestSensexTrendLog?.fastTrend} />
+                      <TrendBadge value={latestDhanTrendLog?.fastTrend} />
                       <span>Slow</span>
-                      <TrendBadge value={latestSensexTrendLog?.slowTrend} />
+                      <TrendBadge value={latestDhanTrendLog?.slowTrend} />
                     </span>
                     <span className="log-trend-card__contract">
-                      {latestSensexTrendLog
-                        ? formatCompactOptionSymbol(latestSensexTrendLog.contract)
+                      {latestDhanTrendLog
+                        ? formatCompactOptionSymbol(latestDhanTrendLog.contract)
                         : "Not available"}
                     </span>
                   </dd>
@@ -6887,6 +8482,19 @@ export function App() {
                             <div className="run-log-contract-card__footer">
                               {item.candle_time ? (
                                 <span>Candle {formatTimeOnly(item.candle_time)}</span>
+                              ) : null}
+                              {item.signal_candle_body_pct != null ? (
+                                <span
+                                  className={`run-log-body-pill run-log-body-pill--${getRunLogBodyTone(item)}`}
+                                >
+                                  Body {formatLogNumber(item.signal_candle_body_pct)}%
+                                </span>
+                              ) : null}
+                              {item.strike_offset != null ? (
+                                <span>
+                                  Offset {Number(item.strike_offset) > 0 ? "+" : ""}
+                                  {item.strike_offset}
+                                </span>
                               ) : null}
                               {isRunLogColumnVisible("message") ? (
                                 <p>{log.message ?? "-"}</p>

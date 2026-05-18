@@ -12,7 +12,7 @@ The app currently supports two independent paper-trading lanes:
 
 | Bot | Exchange | Underlying | Lot Size | Strategy Key |
 | --- | --- | --- | --- | --- |
-| NIFTY 1m Bot | NFO | NIFTY | 75 | `option_contracts_1m` |
+| NIFTY 1m Bot | NFO | NIFTY | 65 | `option_contracts_1m` |
 | SENSEX 1m Bot | BFO | SENSEX | 20 | `option_contracts_1m_sensex` |
 
 Both bots can run at the same time. A NIFTY trade and a SENSEX trade are independent because each lane has its own setup, state, balance, active trade, and trade history.
@@ -339,4 +339,3 @@ and exit if fast Supertrend reverses.
 ```
 
 NIFTY and SENSEX use the same idea, but they are intentionally separated so one market does not affect the other market’s balance, active trade, or reports.
-

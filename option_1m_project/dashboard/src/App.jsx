@@ -869,7 +869,7 @@ export function App() {
     scheduleEnd: "15:00",
     startingBalance: "100000",
     targetPct: "3",
-    maxSignalCandlePct: "10",
+    maxSignalCandlePct: "8",
     stopLossMode: "signal_low",
     stopLossPct: "8",
   });
@@ -910,7 +910,7 @@ export function App() {
     startDate: getTodayInIst(),
     endDate: getTodayInIst(),
     balance: "100000",
-    lotSize: "75",
+    lotSize: "65",
     targetPct: "3",
     stopLossPct: "8",
     stopLossMode: "signal_low",
@@ -1287,10 +1287,10 @@ export function App() {
       ...current,
       [field]: value,
       ...(field === "exchange" && value === "BFO"
-        ? { lotSize: current.lotSize === "75" ? "20" : current.lotSize }
+        ? { lotSize: current.lotSize === "65" ? "20" : current.lotSize }
         : {}),
       ...(field === "exchange" && value === "NFO"
-        ? { lotSize: current.lotSize === "20" ? "75" : current.lotSize }
+        ? { lotSize: current.lotSize === "20" ? "65" : current.lotSize }
         : {}),
     }));
   }
@@ -3814,7 +3814,7 @@ export function App() {
                 <span>Balance Invested</span>
                 <input
                   type="number"
-                  min="75"
+                  min="65"
                   step="1"
                   value={backtestForm.balance}
                   onChange={(event) =>

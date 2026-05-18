@@ -19,13 +19,20 @@ def session_slots(
     buffer_seconds: int,
     tzinfo,
 ) -> list[datetime]:
-    current = datetime.combine(day, start_time, tzinfo=tzinfo).replace(second=buffer_seconds)
+    start = datetime.combine(day, start_time, tzinfo=tzinfo).replace(second=buffer_seconds)
     end = datetime.combine(day, end_time, tzinfo=tzinfo).replace(second=buffer_seconds)
+    interval_delta = timedelta(minutes=interval_minutes)
+
+    day_start = datetime.combine(day, time.min, tzinfo=tzinfo).replace(second=buffer_seconds)
+    elapsed_seconds = (start - day_start).total_seconds()
+    interval_seconds = interval_delta.total_seconds()
+    remainder = elapsed_seconds % interval_seconds
+    current = start if remainder == 0 else start + timedelta(seconds=interval_seconds - remainder)
     slots: list[datetime] = []
 
     while current <= end:
         slots.append(current)
-        current += timedelta(minutes=interval_minutes)
+        current += interval_delta
 
     return slots
 

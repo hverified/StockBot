@@ -13,7 +13,6 @@ import pandas as pd
 from nifty_alert_bot.alerts import format_alert
 from nifty_alert_bot.config import get_settings
 from nifty_alert_bot.data import fetch_candles
-from nifty_alert_bot.exact_candle_collector import collect_exact_option_candles
 from nifty_alert_bot.indicators import build_signal_frame
 from nifty_alert_bot.logging_utils import configure_logging
 from nifty_alert_bot.notifier import TelegramNotifier
@@ -30,7 +29,14 @@ INDEX_STRATEGY_KEY = "index_5m"
 OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m"
 SENSEX_OPTION_CONTRACT_STRATEGY_KEY = "option_contracts_1m_sensex"
 NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY = "option_contracts_5m"
-SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY = "option_contracts_5m_sensex"
+NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY = "option_contracts_5m_v2"
+DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY = "dhan_nifty_5m_live"
+_MISSING_DAILY_SETUP_LOGGED: set[tuple[str, str]] = set()
+OPTION_CONTRACT_STRATEGY_PRIORITY = {
+    DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY: 0,
+    NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY: 1,
+    NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY: 2,
+}
 
 
 def build_state_store(settings) -> StateStore:
@@ -56,8 +62,10 @@ def strategy_key_for_settings(settings, state_key: str | None = None) -> str | N
 def option_strategy_settings_for_key(settings, strategy_key: str):
     is_five_minute = strategy_key in {
         NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
-        SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+        NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
+        DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
     }
+    is_v2 = strategy_key == NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY
     base = replace(
         settings,
         strategy_mode="option_contracts",
@@ -69,8 +77,15 @@ def option_strategy_settings_for_key(settings, strategy_key: str):
         option_contract_target_pct=8 if is_five_minute else settings.option_contract_target_pct,
         option_contract_min_signal_candle_pct=2 if is_five_minute else settings.option_contract_min_signal_candle_pct,
         option_contract_strike_offset=100 if is_five_minute else settings.option_contract_strike_offset,
+        option_contract_expiry_offset=settings.option_contract_expiry_offset,
+        option_contract_require_vwap=is_v2 and settings.option_contract_require_vwap,
+        option_contract_min_volume_multiplier=settings.option_contract_min_volume_multiplier if is_v2 else 0,
+        option_contract_volume_lookback=settings.option_contract_volume_lookback if is_v2 else 20,
+        option_contract_max_entry_gap_pct=settings.option_contract_max_entry_gap_pct if is_v2 else 0,
+        option_contract_trailing_stop_pct=settings.option_contract_trailing_stop_pct if is_v2 else 0,
+        option_contract_max_trades_per_day=settings.option_contract_max_trades_per_day if is_v2 else 0,
     )
-    if strategy_key in {SENSEX_OPTION_CONTRACT_STRATEGY_KEY, SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY}:
+    if strategy_key == SENSEX_OPTION_CONTRACT_STRATEGY_KEY:
         return replace(
             base,
             zerodha_option_exchange="BFO",
@@ -83,7 +98,7 @@ def option_strategy_settings_for_key(settings, strategy_key: str):
         base,
         zerodha_option_exchange="NFO",
         zerodha_underlying="NIFTY",
-        paper_trade_lot_size=75,
+        paper_trade_lot_size=65,
     )
 
 
@@ -139,6 +154,9 @@ def apply_daily_option_contracts(
         option_contract_strike_offset=int(
             daily_contracts.get("strike_offset") if daily_contracts.get("strike_offset") is not None else settings.option_contract_strike_offset
         ),
+        option_contract_expiry_offset=int(
+            daily_contracts.get("expiry_offset") if daily_contracts.get("expiry_offset") is not None else settings.option_contract_expiry_offset
+        ),
         option_contract_entry_signal=str(
             "BUY"
             if settings.option_contract_interval_minutes == 5
@@ -149,6 +167,32 @@ def apply_daily_option_contracts(
         ).lower(),
         option_contract_stop_loss_pct=float(
             daily_contracts.get("stop_loss_pct") or settings.option_contract_stop_loss_pct
+        ),
+        option_contract_require_vwap=bool(daily_contracts.get("require_vwap", settings.option_contract_require_vwap)),
+        option_contract_min_volume_multiplier=float(
+            daily_contracts.get("min_volume_multiplier")
+            if daily_contracts.get("min_volume_multiplier") is not None
+            else settings.option_contract_min_volume_multiplier
+        ),
+        option_contract_volume_lookback=int(
+            daily_contracts.get("volume_lookback")
+            if daily_contracts.get("volume_lookback") is not None
+            else settings.option_contract_volume_lookback
+        ),
+        option_contract_max_entry_gap_pct=float(
+            daily_contracts.get("max_entry_gap_pct")
+            if daily_contracts.get("max_entry_gap_pct") is not None
+            else settings.option_contract_max_entry_gap_pct
+        ),
+        option_contract_trailing_stop_pct=float(
+            daily_contracts.get("trailing_stop_pct")
+            if daily_contracts.get("trailing_stop_pct") is not None
+            else settings.option_contract_trailing_stop_pct
+        ),
+        option_contract_max_trades_per_day=int(
+            daily_contracts.get("max_trades_per_day")
+            if daily_contracts.get("max_trades_per_day") is not None
+            else settings.option_contract_max_trades_per_day
         ),
         paper_trade_capital=float(daily_contracts.get("starting_balance") or settings.paper_trade_capital),
     )
@@ -228,6 +272,9 @@ def build_run_log_payload(
         payload.update(
             {
                 "signal": contract_detail.get("signal") if contract_detail else None,
+                "open": contract_detail.get("open") if contract_detail else None,
+                "high": contract_detail.get("high") if contract_detail else None,
+                "low": contract_detail.get("low") if contract_detail else None,
                 "close": contract_detail.get("close") if contract_detail else None,
                 "st_10_1": contract_detail.get("st_10_1") if contract_detail else None,
                 "st_10_3": contract_detail.get("st_10_3") if contract_detail else None,
@@ -235,6 +282,11 @@ def build_run_log_payload(
                 "st_10_3_trend": contract_detail.get("st_10_3_trend") if contract_detail else None,
                 "candle_time": contract_detail.get("candle_time") if contract_detail else None,
                 "option_symbol": contract_detail.get("resolved_symbol") if contract_detail else None,
+                "strike": contract_detail.get("strike") if contract_detail else None,
+                "strike_offset": contract_detail.get("strike_offset") if contract_detail else None,
+                "expiry": contract_detail.get("expiry") if contract_detail else None,
+                "signal_candle_body_pct": contract_detail.get("signal_candle_body_pct") if contract_detail else None,
+                "signal_candle_range_pct": contract_detail.get("signal_candle_range_pct") if contract_detail else None,
             }
         )
         if details:
@@ -372,22 +424,6 @@ def process_once(
             return
 
         if settings.strategy_mode == "option_contracts":
-            if settings.option_contract_interval_minutes == 5:
-                try:
-                    storage_instrument = (
-                        "SENSEX"
-                        if state_key == SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY
-                        else "NIFTY"
-                    )
-                    stored_counts = collect_exact_option_candles(
-                        settings,
-                        now_ist,
-                        instrument_ids=[storage_instrument],
-                    )
-                    if stored_counts:
-                        logger.info("Stored exact option candles for %s: %s", storage_instrument, stored_counts)
-                except Exception:
-                    logger.exception("Exact option candle storage failed.")
             cycle_result = engine.evaluate_option_contracts(notifier, now_ist)
             record_run_event(
                 state,
@@ -534,14 +570,69 @@ def build_dual_strategy_settings(settings) -> list[tuple[Any, str]]:
 def build_option_contract_strategy_settings(settings) -> list[tuple[Any, str]]:
     return [
         (
+            option_strategy_settings_for_key(settings, DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY),
+            DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY,
+        ),
+        (
             option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY),
             NIFTY_OPTION_CONTRACT_5M_STRATEGY_KEY,
         ),
         (
-            option_strategy_settings_for_key(settings, SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY),
-            SENSEX_OPTION_CONTRACT_5M_STRATEGY_KEY,
+            option_strategy_settings_for_key(settings, NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY),
+            NIFTY_OPTION_CONTRACT_5M_V2_STRATEGY_KEY,
         ),
     ]
+
+
+def has_option_contract_inputs(settings) -> bool:
+    return bool(str(settings.option_contract_1 or "").strip() or str(settings.option_contract_2 or "").strip())
+
+
+def strategy_priority(state_key: str) -> int:
+    return OPTION_CONTRACT_STRATEGY_PRIORITY.get(state_key, 100)
+
+
+def strategy_has_active_trade(state: StateStore, state_key: str) -> bool:
+    try:
+        paper_state = state.load_paper_trading(state_key)
+    except Exception:
+        logger.exception("Failed to load paper state while checking active trade for %s.", state_key)
+        return False
+    return isinstance(paper_state.get("active_trade"), dict)
+
+
+def active_option_contract_strategy_settings(
+    settings,
+    state: StateStore,
+    now: datetime,
+) -> list[tuple[Any, str]]:
+    active_strategies = []
+    trade_date = now.date().isoformat()
+    for strategy_settings, state_key in build_option_contract_strategy_settings(settings):
+        strategy_settings = apply_daily_option_contracts(strategy_settings, state, now, state_key)
+        has_active_trade = strategy_has_active_trade(state, state_key)
+        if not has_option_contract_inputs(strategy_settings) and not has_active_trade:
+            log_key = (state_key, trade_date)
+            if log_key not in _MISSING_DAILY_SETUP_LOGGED:
+                logger.info(
+                    "Skipping %s scheduler because no daily setup/contracts are saved for %s.",
+                    state_key,
+                    trade_date,
+                )
+                _MISSING_DAILY_SETUP_LOGGED.add(log_key)
+            continue
+        if state_key == DHAN_NIFTY_OPTION_5M_LIVE_STRATEGY_KEY:
+            dhan_live_state = state.load_dhan_live_trading()
+            enabled_keys = dhan_live_state.get("enabled_strategy_keys")
+            is_enabled = dhan_live_state.get("enabled") and not (
+                isinstance(enabled_keys, list)
+                and enabled_keys
+                and state_key not in enabled_keys
+            )
+            if not is_enabled and not has_active_trade:
+                continue
+        active_strategies.append((strategy_settings, state_key))
+    return active_strategies
 
 
 def option_contract_runtime_settings(settings):
@@ -618,21 +709,68 @@ def run_live(*, force_weekend_runs: bool = False) -> None:
     state = build_state_store(settings)
     run_logs = RunLogStore(settings.run_logs_dir)
     logger.info(
-        "Starting option-contract paper bots for NIFTY/SENSEX 5m only. Schedule: %s to %s IST at +2 seconds.",
+        "Starting NIFTY 5m option-contract bots. Schedule: %s to %s IST at +2 seconds.",
         settings.schedule_start,
         settings.schedule_end,
     )
     running_threads: dict[str, threading.Thread] = {}
 
+    def start_strategy_worker(
+        strategy_settings,
+        state_key: str,
+        *,
+        reason: str,
+    ) -> bool:
+        running_thread = running_threads.get(state_key)
+        if running_thread is not None and running_thread.is_alive():
+            logger.info("Skipped %s %s because its worker is already active.", state_key, reason)
+            return False
+
+        def run_strategy_once() -> None:
+            try:
+                process_once(strategy_settings, notifier, state, run_logs, state_key=state_key)
+            except Exception:
+                logger.exception("Scheduled %s bot iteration failed", state_key)
+
+        thread = threading.Thread(
+            target=run_strategy_once,
+            name=f"{state_key}-worker",
+            daemon=True,
+        )
+        running_threads[state_key] = thread
+        thread.start()
+        return True
+
     while True:
         now_ist = datetime.now(settings.timezone)
-        strategies = [
-            (
-                apply_daily_option_contracts(strategy_settings, state, now_ist, state_key),
-                state_key,
+        strategies = active_option_contract_strategy_settings(settings, state, now_ist)
+        if not strategies:
+            next_run = next_run_at(
+                now_ist,
+                settings.schedule_start,
+                settings.schedule_end,
+                5,
+                2,
+                include_weekends=settings.force_weekend_runs,
             )
-            for strategy_settings, state_key in build_option_contract_strategy_settings(settings)
-        ]
+            sleep_seconds = max((next_run - now_ist).total_seconds(), 0.0)
+            logger.info(
+                "No 5m option bot setup is saved for today. Rechecking at %s.",
+                next_run.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
+            )
+            time.sleep(sleep_seconds)
+            continue
+
+        for strategy_settings, state_key in strategies:
+            if strategy_has_active_trade(state, state_key):
+                started = start_strategy_worker(
+                    strategy_settings,
+                    state_key,
+                    reason="active-trade resume",
+                )
+                if started:
+                    logger.info("Started immediate active-trade monitor for %s.", state_key)
+
         scheduled_runs = [
             (
                 next_run_at(
@@ -660,29 +798,16 @@ def run_live(*, force_weekend_runs: bool = False) -> None:
         time.sleep(sleep_seconds)
 
         due_at = datetime.now(settings.timezone)
-        for strategy_run_at, strategy_settings, state_key in scheduled_runs:
+        for strategy_run_at, strategy_settings, state_key in sorted(
+            scheduled_runs,
+            key=lambda item: (item[0], strategy_priority(item[2])),
+        ):
             if strategy_run_at <= due_at:
-                running_thread = running_threads.get(state_key)
-                if running_thread is not None and running_thread.is_alive():
-                    logger.info("Skipped %s scheduled scan because its previous worker is still active.", state_key)
-                    continue
-
-                def run_strategy_once(
-                    strategy_settings=strategy_settings,
-                    state_key=state_key,
-                ) -> None:
-                    try:
-                        process_once(strategy_settings, notifier, state, run_logs, state_key=state_key)
-                    except Exception:
-                        logger.exception("Scheduled %s bot iteration failed", state_key)
-
-                thread = threading.Thread(
-                    target=run_strategy_once,
-                    name=f"{state_key}-worker",
-                    daemon=True,
+                start_strategy_worker(
+                    strategy_settings,
+                    state_key,
+                    reason="scheduled scan",
                 )
-                running_threads[state_key] = thread
-                thread.start()
 
 
 def main() -> None:

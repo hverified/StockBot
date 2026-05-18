@@ -21,6 +21,7 @@ export const WEEKDAY_REPORT_DAYS = [
 ];
 export const BACKTEST_INSTRUMENT_OPTIONS = [
   { id: "NIFTY", label: "NIFTY 50" },
+  { id: "BANKNIFTY", label: "BANK NIFTY" },
   { id: "SENSEX", label: "SENSEX" },
 ];
 export const BACKTEST_SIGNAL_MODE_OPTIONS = [
@@ -35,49 +36,43 @@ export const BACKTEST_ENTRY_TIMING_OPTIONS = [
   { id: "signal_close", label: "Signal close" },
   { id: "next_minute", label: "+1 min" },
 ];
-export const OPTION_BACKTEST_EXCHANGES = ["NFO", "BFO"];
-export const OPTION_BACKTEST_ENTRY_SIGNALS = [
-  { id: "BUY", label: "BUY" },
-  { id: "SELL", label: "SELL" },
-  { id: "BOTH", label: "Both" },
+export const EXPIRY_OFFSET_OPTIONS = [
+  { id: "0", label: "Nearest expiry" },
+  { id: "1", label: "Next expiry" },
+  { id: "2", label: "Third expiry" },
 ];
 export const STRATEGY_FILTER_OPTIONS = [
   { id: "all", label: "All" },
-  { id: "niftyFiveMinute", label: "NIFTY 5m" },
-  { id: "sensexFiveMinute", label: "SENSEX 5m" },
+  { id: "niftyFiveMinute", label: "NIFTY 5m V1" },
+  { id: "niftyFiveMinuteV2", label: "NIFTY 5m V2" },
+  { id: "dhanLive", label: "Dhan Live" },
 ];
 export const NAV_OPTIONS = [
   { id: "overview", label: "Overview" },
-  { id: "niftyFiveMinuteBot", label: "NIFTY 5m Bot" },
-  { id: "sensexFiveMinuteBot", label: "SENSEX 5m Bot" },
+  { id: "niftyFiveMinuteBot", label: "NIFTY 5m Bot V1" },
+  { id: "niftyFiveMinuteBotV2", label: "NIFTY 5m Bot V2" },
   { id: "balance", label: "Balance" },
   { id: "trades", label: "Trades" },
   { id: "signals", label: "Signals" },
   { id: "reports", label: "Reports" },
   { id: "liveTrading", label: "Live Trading" },
+  { id: "dhanLiveTrading", label: "Dhan Live" },
   { id: "broker", label: "Broker" },
   { id: "logs", label: "Logs" },
   { id: "niftyFiveMinuteBacktest", label: "5m Option Backtest" },
-  { id: "optionBacktest", label: "Option Backtest" },
+  { id: "backtestGroups", label: "Backtest Groups" },
 ];
 export const THEME_OPTIONS = [
   { id: "warm", label: "Warm" },
   { id: "cool", label: "Cool" },
-  { id: "nature", label: "Nature" },
   { id: "finance", label: "Finance" },
-  { id: "sunset", label: "Sunset" },
-  { id: "neon", label: "Neon" },
-  { id: "dark-pro", label: "Dark Pro" },
-  { id: "midnight", label: "Midnight" },
-  { id: "ice", label: "Ice" },
-  { id: "luxe", label: "Luxe" },
-  { id: "amber", label: "Amber" },
 ];
 export const DAILY_SETUP_KEYS = {
   niftyOneMinuteBot: "option_contracts_1m",
   sensexOneMinuteBot: "option_contracts_1m_sensex",
   niftyFiveMinuteBot: "option_contracts_5m",
-  sensexFiveMinuteBot: "option_contracts_5m_sensex",
+  niftyFiveMinuteBotV2: "option_contracts_5m_v2",
+  dhanNiftyFiveMinuteLive: "dhan_nifty_5m_live",
 };
 export const DEFAULT_DAILY_SETUP_FORM = {
   contractMode: "dynamic",
@@ -88,11 +83,18 @@ export const DEFAULT_DAILY_SETUP_FORM = {
   scheduleEnd: "15:00",
   startingBalance: "100000",
   targetPct: "3",
-  maxSignalCandlePct: "10",
+  maxSignalCandlePct: "8",
   minSignalCandlePct: "0",
   strikeOffset: "0",
+  expiryOffset: "0",
   stopLossMode: "signal_low",
   stopLossPct: "8",
+  requireVwap: false,
+  minVolumeMultiplier: "0",
+  volumeLookback: "20",
+  maxEntryGapPct: "0",
+  trailingStopPct: "0",
+  maxTradesPerDay: "0",
 };
 
 export function parseIstDate(value) {
@@ -602,20 +604,19 @@ export function MarketQuoteCard({ quote }) {
   const change = Number(quote.change ?? 0);
   const tone = getPnlTone(change);
   const sign = change > 0 ? "+" : "";
-  const sparkline = Array.isArray(quote.sparkline) ? quote.sparkline : [];
-  const prices = sparkline
-    .map((point) => Number(point.close))
-    .filter((value) => Number.isFinite(value));
-  const minPrice = prices.length ? Math.min(...prices) : 0;
-  const maxPrice = prices.length ? Math.max(...prices) : 0;
-  const priceRange = maxPrice - minPrice || 1;
-  const sparklinePath = prices
-    .map((price, index) => {
-      const x = prices.length === 1 ? 100 : (index / (prices.length - 1)) * 100;
-      const y = 34 - ((price - minPrice) / priceRange) * 28;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
+  const dayLow = quote.dayLow ?? quote.low;
+  const dayHigh = quote.dayHigh ?? quote.high;
+  const ltp = Number(quote.ltp);
+  const low = Number(dayLow);
+  const high = Number(dayHigh);
+  const hasRange =
+    Number.isFinite(ltp) &&
+    Number.isFinite(low) &&
+    Number.isFinite(high) &&
+    high > low;
+  const rangePosition = hasRange
+    ? Math.min(100, Math.max(0, ((ltp - low) / (high - low)) * 100))
+    : 50;
 
   return (
     <article className={`metric-card metric-card--${tone} quote-card`}>
@@ -643,23 +644,29 @@ export function MarketQuoteCard({ quote }) {
               : `${sign}${formatNumber(quote.change)} (${sign}${formatNumber(quote.changePct)}%)`}
           </p>
         </div>
-        <div className={`quote-sparkline quote-sparkline--${tone}`}>
-          {sparklinePath ? (
-            <svg
-              viewBox="0 0 100 40"
-              preserveAspectRatio="none"
-              role="img"
-              aria-label={`${quote.name} intraday mini chart`}
+        <div
+          className={`quote-range-visual quote-range-visual--${tone}`}
+          aria-label={`${quote.name} current value within day low and high`}
+        >
+          <div className="quote-range-visual__track">
+            <span
+              className="quote-range-visual__fill"
+              style={{ width: `${rangePosition}%` }}
+            />
+            <span
+              className="quote-range-visual__marker"
+              style={{ left: `${rangePosition}%` }}
             >
-              <path
-                className="quote-sparkline__area"
-                d={`${sparklinePath} L 100 40 L 0 40 Z`}
-              />
-              <path className="quote-sparkline__line" d={sparklinePath} />
-            </svg>
-          ) : (
-            <span>No chart</span>
-          )}
+              <span className="quote-range-visual__marker-label">
+                {hasRange ? "Now" : "N/A"}
+              </span>
+            </span>
+          </div>
+          <div className="quote-range-visual__labels">
+            <span>{hasRange ? formatNumber(dayLow) : "Low N/A"}</span>
+            <span>{hasRange ? formatNumber(quote.ltp) : "Current N/A"}</span>
+            <span>{hasRange ? formatNumber(dayHigh) : "High N/A"}</span>
+          </div>
         </div>
       </div>
     </article>
@@ -1025,7 +1032,11 @@ export function formatCompactOptionSymbol(value) {
   if (!symbol) return "";
   const match = symbol.match(/(\d{5})(CE|PE)$/);
   if (!match) return symbol;
-  const prefix = symbol.includes("SENSEX") ? "S" : "N";
+  const prefix = symbol.includes("SENSEX")
+    ? "S"
+    : symbol.includes("BANKNIFTY")
+      ? "BN"
+      : "N";
   return `${prefix}-${match[1]}${match[2]}`;
 }
 

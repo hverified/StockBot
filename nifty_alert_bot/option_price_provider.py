@@ -217,6 +217,13 @@ class OptionPriceProvider:
                     previous_close = None
                     if isinstance(quote.get("ohlc"), dict) and quote["ohlc"].get("close") is not None:
                         previous_close = float(quote["ohlc"]["close"])
+                    day_high = None
+                    day_low = None
+                    if isinstance(quote.get("ohlc"), dict):
+                        if quote["ohlc"].get("high") is not None:
+                            day_high = float(quote["ohlc"]["high"])
+                        if quote["ohlc"].get("low") is not None:
+                            day_low = float(quote["ohlc"]["low"])
                     change = round(ltp - previous_close, 2) if ltp is not None and previous_close else None
                     change_pct = (
                         round((change / previous_close) * 100.0, 2)
@@ -229,6 +236,8 @@ class OptionPriceProvider:
                             "ltp": round(ltp, 2) if ltp is not None else None,
                             "change": change,
                             "changePct": change_pct,
+                            "dayHigh": round(day_high, 2) if day_high is not None else None,
+                            "dayLow": round(day_low, 2) if day_low is not None else None,
                             "source": "zerodha_rest",
                             "sparkline": self._index_sparkline(item),
                             "updatedAt": datetime.now(self.settings.timezone).isoformat(),
@@ -245,6 +254,8 @@ class OptionPriceProvider:
                 {
                     "name": item["name"],
                     "ltp": None,
+                    "dayHigh": None,
+                    "dayLow": None,
                     "source": "zerodha_unavailable",
                     "sparkline": [],
                     "updatedAt": datetime.now(self.settings.timezone).isoformat(),
@@ -269,6 +280,8 @@ class OptionPriceProvider:
                     daily.columns = daily.columns.get_level_values(0)
                 daily = daily.dropna()
                 previous_close = float(daily["Close"].iloc[-2]) if len(daily) >= 2 else None
+                day_high = float(daily["High"].iloc[-1]) if len(daily) >= 1 else None
+                day_low = float(daily["Low"].iloc[-1]) if len(daily) >= 1 else None
                 change = round(ltp - previous_close, 2) if previous_close else None
                 change_pct = round((change / previous_close) * 100.0, 2) if change is not None and previous_close else None
                 quotes.append(
@@ -277,6 +290,8 @@ class OptionPriceProvider:
                         "ltp": round(ltp, 2),
                         "change": change,
                         "changePct": change_pct,
+                        "dayHigh": round(day_high, 2) if day_high is not None else None,
+                        "dayLow": round(day_low, 2) if day_low is not None else None,
                         "source": "yfinance",
                         "sparkline": self._index_sparkline(item),
                         "updatedAt": datetime.now(self.settings.timezone).isoformat(),
@@ -287,6 +302,8 @@ class OptionPriceProvider:
                     {
                         "name": item["name"],
                         "ltp": None,
+                        "dayHigh": None,
+                        "dayLow": None,
                         "source": "unavailable",
                         "sparkline": [],
                         "updatedAt": datetime.now(self.settings.timezone).isoformat(),
@@ -299,6 +316,7 @@ class OptionPriceProvider:
         target = str(underlying or "").strip().upper()
         instruments = {
             "NIFTY": {"key": "NSE:NIFTY 50", "fallback_symbol": "^NSEI"},
+            "BANKNIFTY": {"key": "NSE:NIFTY BANK", "fallback_symbol": "^NSEBANK"},
             "SENSEX": {"key": "BSE:SENSEX", "fallback_symbol": "^BSESN"},
         }
         item = instruments.get(target)
@@ -437,6 +455,7 @@ class OptionPriceProvider:
         underlying: str | None = None,
         max_expiry_gap_days: int | None = None,
         allow_cached: bool = True,
+        expiry_offset: int = 0,
     ) -> OptionContract | None:
         target_exchange = exchange or self.settings.zerodha_option_exchange
         target_underlying = (underlying or self.settings.zerodha_underlying).upper()
@@ -451,6 +470,7 @@ class OptionPriceProvider:
                 target_exchange,
                 target_underlying,
                 max_expiry_gap_days,
+                expiry_offset,
             )
 
         try:
@@ -469,6 +489,7 @@ class OptionPriceProvider:
                 target_exchange,
                 target_underlying,
                 max_expiry_gap_days,
+                expiry_offset,
             )
 
         as_of_date = as_of.date()
@@ -499,6 +520,7 @@ class OptionPriceProvider:
                     target_exchange,
                     target_underlying,
                     max_expiry_gap_days,
+                    expiry_offset,
                 )
                 if cached_contract is not None:
                     return cached_contract
@@ -510,7 +532,30 @@ class OptionPriceProvider:
             )
             return None
 
-        chosen = min(matches, key=lambda item: (_parse_expiry(item.get("expiry")) or as_of_date, item.get("tradingsymbol", "")))
+        expiry_dates = sorted(
+            {
+                expiry_date
+                for item in matches
+                if (expiry_date := _parse_expiry(item.get("expiry"))) is not None
+            }
+        )
+        expiry_index = max(0, int(expiry_offset or 0))
+        if expiry_index >= len(expiry_dates):
+            logger.warning(
+                "No %s expiry offset %s found for %s %s %s. Available expiries: %s.",
+                target_underlying,
+                expiry_index,
+                target_underlying,
+                strike,
+                option_type,
+                ", ".join(expiry.isoformat() for expiry in expiry_dates) or "none",
+            )
+            return None
+        selected_expiry = expiry_dates[expiry_index]
+        expiry_matches = [
+            item for item in matches if _parse_expiry(item.get("expiry")) == selected_expiry
+        ]
+        chosen = min(expiry_matches, key=lambda item: item.get("tradingsymbol", ""))
         expiry_value = _parse_expiry(chosen.get("expiry"))
         return OptionContract(
             exchange=str(chosen.get("exchange") or target_exchange),
@@ -563,6 +608,7 @@ class OptionPriceProvider:
         underlying: str | None = None,
         max_expiry_gap_days: int | None = None,
         allow_cached: bool = True,
+        expiry_offset: int | None = None,
     ) -> OptionContract | None:
         normalized = str(contract_input or "").strip().upper().replace(" ", "")
         if not normalized:
@@ -580,6 +626,9 @@ class OptionPriceProvider:
                 underlying=underlying,
                 max_expiry_gap_days=max_expiry_gap_days,
                 allow_cached=allow_cached,
+                expiry_offset=self.settings.option_contract_expiry_offset
+                if expiry_offset is None
+                else expiry_offset,
             )
 
         side_match = re.fullmatch(r"(CE|PE)", normalized)
@@ -611,6 +660,9 @@ class OptionPriceProvider:
                 underlying=target_underlying,
                 max_expiry_gap_days=max_expiry_gap_days,
                 allow_cached=allow_cached,
+                expiry_offset=self.settings.option_contract_expiry_offset
+                if expiry_offset is None
+                else expiry_offset,
             )
 
         return self.find_contract_by_symbol(normalized, exchange)
@@ -782,6 +834,7 @@ class OptionPriceProvider:
         exchange: str,
         underlying: str,
         max_expiry_gap_days: int | None = None,
+        expiry_offset: int = 0,
     ) -> OptionContract | None:
         as_of_date = as_of.astimezone(self.settings.timezone).date()
         matches: list[OptionContract] = []
@@ -817,7 +870,25 @@ class OptionPriceProvider:
         if not matches:
             return None
 
-        chosen = min(matches, key=lambda item: (datetime.fromisoformat(item.expiry).date(), item.tradingsymbol))
+        expiry_dates = sorted({datetime.fromisoformat(item.expiry).date() for item in matches})
+        expiry_index = max(0, int(expiry_offset or 0))
+        if expiry_index >= len(expiry_dates):
+            logger.warning(
+                "No cached %s expiry offset %s found for %s %s %s. Available expiries: %s.",
+                underlying,
+                expiry_index,
+                underlying,
+                strike,
+                option_type,
+                ", ".join(expiry.isoformat() for expiry in expiry_dates) or "none",
+            )
+            return None
+
+        selected_expiry = expiry_dates[expiry_index]
+        chosen = min(
+            (item for item in matches if datetime.fromisoformat(item.expiry).date() == selected_expiry),
+            key=lambda item: item.tradingsymbol,
+        )
         logger.info(
             "Resolved %s %s %s from cached Zerodha option candles: %s expiring %s.",
             underlying,
